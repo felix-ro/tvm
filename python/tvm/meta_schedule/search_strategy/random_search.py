@@ -5,6 +5,8 @@ from tvm.ir import IRModule
 
 from .search_strategy import PySearchStrategy, MeasureCandidate, SearchStrategy
 from ..utils import derived_object
+from ..arg_info import ArgInfo
+from ..runner import RunnerResult
 
 if TYPE_CHECKING:
     from ..cost_model import CostModel
@@ -33,6 +35,25 @@ def sample_int(rand_state: np.int64, min_inclusive: int, max_exclusive: int):
     np.random.seed(rand_)
     dist = random.randint(min_inclusive, max_exclusive-1)
     return dist
+
+
+def assemble_candidates(picks: List[Schedule]) -> List[MeasureCandidate]:
+    """Assemble a list of candidates from a list of schedules."""
+    measure_inputs = [None for _ in range(len(picks))]
+    for i, sch in enumerate(picks):
+        measure_inputs[i] = MeasureCandidate(sch, ArgInfo.from_entry_func(sch.mod, remove_preproc=True))
+    return measure_inputs
+
+
+def predict_normalized_score(candidates, context, cost_model):
+    """Predict the normalized score of a list of candidates."""
+    assert len(candidates) != 0, "Candidates given for score prediction can not be empty list!"
+    scores = cost_model.predict(context, assemble_candidates(candidates))
+
+    # print(f"TLP predict = {scores}")
+    scores = np.clip(scores, 0.0, np.inf)
+    # print(f"TLP predict normal score = {scores}")
+    return scores
 
 
 class ThreadedTraceApply:
@@ -125,14 +146,16 @@ class State:
 
         assert self.st < self.ed, f"check failed: {self.st} < {self.ed}"
 
-        # 1. Pick best candidates from database -- initial value is None
-
-        # 2. Sample a new population of schedules
+        # Sample a new population of random schedules
         unmeasured_schedules: List[Schedule] = self.sample_initial_population(self.search_strategy.population_size)
 
-        print("finished till here!")
+        # Check if minimum amount of schedules were sampled
+        if (len(unmeasured_schedules) < self.search_strategy.init_min_unmeasured):
+            raise ValueError  # Specify a better error here
 
-        return unmeasured_schedules
+        # Pick top-k best schedules using cost func to avoid measuring all schedules
+        top_k_schedules = self.get_top_k_schedules(unmeasured_schedules, sample_num)
+        return assemble_candidates(top_k_schedules)
 
     def sample_initial_population(self, num_traces: int) -> List[Schedule]:
         postproc = ThreadedTraceApply(self.search_strategy.postprocs)
@@ -167,6 +190,19 @@ class State:
                     output_schedules.append(results[i])
             fail_count += not found_new
             return output_schedules
+
+    def get_top_k_schedules(self, schedules: List[Schedule], k: int) -> List[Schedule]:
+        scores = predict_normalized_score(schedules, self.context, self.cost_model)
+        idx = np.argsort(scores)[-k:]
+
+        top_schedules: List[Schedule] = []
+        for index in idx:
+            top_schedules.append(schedules[index])
+        return top_schedules
+
+    def notify_runner_results(self, measure_candidates: List[MeasureCandidate], results: List[RunnerResult]):
+        self.st += len(results)
+        self.ed += len(results)
 
 
 @derived_object
@@ -241,6 +277,22 @@ class RandomSearch(PySearchStrategy):
             The measure candidates generated, None if finished.
         """
         return self.state.generate_measure_candidates()
+
+    def notify_runner_results(
+        self,
+        measure_candidates: List[MeasureCandidate],
+        results: List[RunnerResult],
+    ) -> None:
+        """Update the search strategy with profiling results.
+
+        Parameters
+        ----------
+        measure_candidates : List[MeasureCandidate]
+            The measure candidates for update.
+        results : List[RunnerResult]
+            The profiling results from the runner.
+        """
+        self.state.notify_runner_results(measure_candidates, results)
 
     def clone(self) -> SearchStrategy:
         """Clone the search strategy.
