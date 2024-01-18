@@ -1,5 +1,7 @@
 from typing import TYPE_CHECKING, List, Optional
 from tvm.tir.schedule import Schedule, Trace
+from tvm.ir import IRModule
+
 
 from .search_strategy import PySearchStrategy, MeasureCandidate, SearchStrategy
 from ..utils import derived_object
@@ -9,28 +11,99 @@ if TYPE_CHECKING:
     from ..database import Database
     from ..tune_context import TuneContext
 
+import numpy as np
+import copy
+import random
 
-class State():
-    max_trials: int = None
-    num_trials_per_iter: int = None
-    design_spaces: List[Schedule] = None
-    database: Optional["Database"] = None
-    cost_model: Optional["CostModel"] = None
 
-    max_fail_count = 300
+def forkseed(rand_state):
+    rand_state = int(rand_state+random.random()*1999999973)
+    new_rand_state = (rand_state * 32767) % 1999999973
+    return new_rand_state
 
+
+# min_inclusive & max_exclusive: [min, max)
+def sample_int(rand_state: np.int64, min_inclusive: int, max_exclusive: int):
+    assert min_inclusive < max_exclusive, "ValueError: max_exclusive must be greater than min_inclusive."
+
+    if ((min_inclusive + 1) == max_exclusive):
+        return min_inclusive
+    rand_ = forkseed(rand_state)
+    # call np.random to generate [min, max-1]
+    np.random.seed(rand_)
+    dist = random.randint(min_inclusive, max_exclusive-1)
+    return dist
+
+
+class ThreadedTraceApply:
+    class Item:
+        postproc = None
+        fail_counter = 0
+
+        def __init__(self, postproc):
+            self.postproc = postproc
+
+    def __init__(self, postprocs) -> None:
+        self.n_ = len(postprocs)
+        self.items_ = [self.Item(postprocs[i]) for i in range(self.n_)]
+
+    def apply(self, mod: IRModule, trace: Trace, rand_state: np.int64):
+        sch = Schedule(mod=mod,
+                       seed=forkseed(rand_state),
+                       debug_mask=0,
+                       error_render_level="none",)
+        trace.apply_to_schedule(sch=sch, remove_postproc=True)
+        sch.enter_postproc()
+
+        for i in range(self.n_):
+            item = self.items_[i]
+            if not item.postproc.apply(sch):
+                item.fail_counter += 1
+                return None
+        return sch
+
+
+class PerThreadData:
+    mod: IRModule = None
+    rand_state: np.int64 = np.int64(-1)
+
+    def __init__(self) -> None:
+        self.mod = None
+        self.rand_state = np.int64(-1)
+
+
+class State:
     def __init__(self,
-                 max_trials: int = None,
-                 num_trials_per_iter: int = None,
-                 design_spaces: List[Schedule] = None,
-                 database: Optional["Database"] = None,
-                 cost_model: Optional["CostModel"] = None
+                 max_trials: int,
+                 num_trials_per_iter: int,
+                 design_spaces_schedules: List[Schedule],
+                 database: Optional["Database"],
+                 cost_model: Optional["CostModel"],
+                 search_strategy: "RandomSearch",
+                 context
                  ):
         self.max_trials = max_trials
         self.num_trials_per_iter = num_trials_per_iter
-        self.design_spaces = design_spaces
+        self.design_space_schedules = design_spaces_schedules
         self.database = database
         self.cost_model = cost_model
+        self.search_strategy: RandomSearch = search_strategy
+        self.context = context
+        self.mod = context.mod
+
+        self.design_spaces = []
+        for space in self.design_space_schedules:
+            self.design_spaces.append(space.trace.simplified(True))
+
+        # [st, ed) are the indices of the next batch of candidates.
+        self.st: int = 0
+        self.ed: int = num_trials_per_iter
+        self.max_fail_count: int = 300
+
+        self.per_thread_data_ = [PerThreadData() for i in range(self.context.num_threads)]
+        for i in range(self.context.num_threads):
+            self.per_thread_data_[i].mod = copy.deepcopy(self.mod)
+            self.per_thread_data_[i].rand_state = forkseed(self.search_strategy.rand_state)
 
     def reset(self):
         self.max_trials = None
@@ -40,34 +113,71 @@ class State():
         self.cost_model = None
 
     def generate_measure_candidates(self) -> Optional[List[MeasureCandidate]]:
-        schedules: List[MeasureCandidate] = _SampleInitialPopulation(self.state, self.min_sample, self.context.mod)
+        # Check if there are any trials left
+        if (self.st >= self.max_trials):
+            return None
 
-        return schedules
+        # Check if next batch would go above max trial limit and adjust down
+        sample_num = self.num_trials_per_iter
+        if (self.ed > self.max_trials):
+            sample_num = self.max_trials - self.st
+            self.ed = self.max_trials
 
+        assert self.st < self.ed, f"check failed: {self.st} < {self.ed}"
 
-def _SampleInitialPopulation(state, min_sample, mod):
-    schedules: List[MeasureCandidate] = []
+        # 1. Pick best candidates from database -- initial value is None
 
-    fail_count: int = 0
-    while (fail_count < state.max_fail_count and len(schedules) < min_sample):
+        # 2. Sample a new population of schedules
+        unmeasured_schedules: List[Schedule] = self.sample_initial_population(self.search_strategy.population_size)
 
-        seed = None
+        print("finished till here!")
 
-        trace: Trace = Trace()  # fill range
+        return unmeasured_schedules
 
-        sch: Schedule = Schedule(mod=mod, seed=seed, enable_check=True)
-        trace.apply_to_schedule(sch=sch, remove_postproc=True)
+    def sample_initial_population(self, num_traces: int) -> List[Schedule]:
+        postproc = ThreadedTraceApply(self.search_strategy.postprocs)
+        output_schedules: List[Schedule] = []
+        fail_count: int = 0
+        while (fail_count < self.search_strategy.max_fail_count and
+               len(output_schedules) < self.search_strategy.init_min_unmeasured):
 
-        sch.enter_postproc()
+            results = [None] * num_traces
 
-        schedules.append(sch)
+            def f_proc_unmeasured(thread_id: int, trace_id: int):
+                thread_id = thread_id % self.context.num_threads
+                data: PerThreadData = self.per_thread_data_[thread_id]
+                rand_state: np.int64 = data.rand_state
+                mod: IRModule = data.mod
+
+                assert results[trace_id] is None, f"results {trace_id} should be None"
+
+                design_space_index: int = sample_int(rand_state, 0, len(self.design_spaces))
+                trace: Trace = Trace(self.design_spaces[design_space_index].insts, {})
+                sch: Schedule = postproc.apply(mod=mod, trace=trace, rand_state=rand_state)
+                if (sch is not None):
+                    results[trace_id] = sch
+
+            for i in range(num_traces):
+                f_proc_unmeasured(i, i)
+
+            found_new: bool = False
+            for i in range(num_traces):
+                if (results[i] is not None):
+                    found_new = True
+                    output_schedules.append(results[i])
+            fail_count += not found_new
+            return output_schedules
 
 
 @derived_object
 class RandomSearch(PySearchStrategy):
-    min_sample: int = 50
     context: "TuneContext" = None
     state: State = None
+
+    population_size = 512
+    init_measured_ratio = 0.2
+    init_min_unmeasured = 50
+    max_fail_count = 50
 
     def _initialize_with_tune_context(self, context: "TuneContext") -> None:
         """Initialize the search strategy with tuning context.
@@ -78,6 +188,8 @@ class RandomSearch(PySearchStrategy):
             The tuning context for initialization.
         """
         self.context = context
+        self.postprocs = context.space_generator.postprocs
+        self.rand_state = forkseed(context.rand_state)
 
     def pre_tuning(
         self,
@@ -103,17 +215,18 @@ class RandomSearch(PySearchStrategy):
             The cost model used during tuning process.
         """
         # ToDo add checks here
+        assert design_spaces is not None, "Design spaces should not be None!"
         if self.state is not None:
             print("ValueError: `PreTuning` is already invoked without corresponding `PostTuning`.")
             raise ValueError
 
         self.state = State(max_trials=max_trials,
                            num_trials_per_iter=num_trials_per_iter,
-                           design_spaces=design_spaces,
+                           design_spaces_schedules=design_spaces,
                            database=database,
-                           cost_model=cost_model)
-
-        print(self.state.database)
+                           cost_model=cost_model,
+                           search_strategy=self,
+                           context=self.context)
 
     def post_tuning(self) -> None:
         """Post-tuning for the search strategy."""
