@@ -1,5 +1,5 @@
 from typing import TYPE_CHECKING, List, Optional, Any
-from tvm.tir.schedule import Schedule, Trace, Instruction, InstructionKind
+from tvm.tir.schedule import Schedule, Trace, Instruction
 from tvm.ir import IRModule
 
 
@@ -18,6 +18,8 @@ if TYPE_CHECKING:
 import numpy as np
 import copy
 import random
+
+DECISION_TYPE = Any
 
 
 def forkseed(rand_state):
@@ -98,37 +100,34 @@ class PerThreadData:
 class BayOptTuner:
     def __init__(self,
                  sch: Schedule,
-                 postprocs):
+                 state: "State"):
         self.sch: Schedule = sch
-        self.postprocs = postprocs
+        self.postprocs = state.search_strategy.postprocs
+        self.state: State = state
 
     def tune(self):
         print("Tuning has started...")
 
-        tune_inst: Instruction = None
-        tune_attr: List[ATTR_TYPE]
+        data: PerThreadData = self.state.per_thread_data_[0]  # Fix this
+        sch: Schedule = self.sch
+        mod: IRModule = data.mod
 
-        # Get a sample perfect tile instruction
-        for inst in self.sch.trace.insts:
-            kind: InstructionKind = inst.kind
+        sch.show()
 
-            if (kind.name == "SamplePerfectTile"):
-                tune_inst = inst
-                tune_attr = inst.attrs
+        for i in range(len(self.sch.trace.decisions)):
+            inst, decision = sch.trace.decisions.items()[i]
+            new_sch: Schedule = self.apply_decision_to_trace(mod=mod, trace=sch.trace, inst=inst, decision=decision)
+            sch = new_sch
 
-                print(tune_inst)
-                print(tune_attr)
+        sch.show()
+        return sch
 
-                print(self.sch.trace.show())
+    def apply_decision_to_trace(self, mod: IRModule, trace: Trace,
+                                inst: Instruction, decision: DECISION_TYPE) -> Schedule | None:
+        trace.with_decision(inst=inst, decision=decision, remove_postproc=True)
 
-                trace = self.sch.trace.with_decision(tune_inst, [4, 64], True)
-                print(trace.show())
-
-                pp = ThreadedTraceApply(postprocs=self.postprocs)
-                return pp.apply(self.sch.mod, trace, 1)
-
-                # self.sch.trace.apply_to_schedule(sch=self.sch, remove_postproc=True)
-                return self.sch
+        pp = ThreadedTraceApply(postprocs=self.postprocs)
+        return pp.apply(mod=mod, trace=trace, rand_state=1)
 
 
 class State:
@@ -195,7 +194,7 @@ class State:
         top_k_schedules = self.get_top_k_schedules(unmeasured_schedules, sample_num)
 
         # Testing tuning start
-        bay_opt_tuner = BayOptTuner(top_k_schedules[0], self.search_strategy.postprocs)
+        bay_opt_tuner = BayOptTuner(top_k_schedules[0], self)
         top_k_schedules[0] = bay_opt_tuner.tune()
         # Testing tuning end
 
