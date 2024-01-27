@@ -183,6 +183,7 @@ class SearchStrategy(Object):
             "replay-trace",
             "replay-func",
             "random",
+            "bayesian"
         ] = "evolutionary",
         *args,
         **kwargs,
@@ -193,6 +194,7 @@ class SearchStrategy(Object):
             ReplayFunc,
             ReplayTrace,
             RandomSearch,
+            BayesianOptimizationSearch,
         )
 
         if kind == "evolutionary":
@@ -203,6 +205,8 @@ class SearchStrategy(Object):
             return ReplayFunc(*args, **kwargs)  # type: ignore
         if kind == "random":
             return RandomSearch(*args, **kwargs)
+        if kind == "bayesian":
+            return BayesianOptimizationSearch(*args, **kwargs)
         raise ValueError(f"Unknown SearchStrategy: {kind}")
 
 
