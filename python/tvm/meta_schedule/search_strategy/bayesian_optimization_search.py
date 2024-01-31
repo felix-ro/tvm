@@ -1,7 +1,6 @@
-from typing import TYPE_CHECKING, List, Optional, Any
+from typing import TYPE_CHECKING, List, Optional, Any, Dict
 from tvm.tir.schedule import Schedule, Trace, Instruction
 from tvm.ir import IRModule
-
 
 from .search_strategy import PySearchStrategy, MeasureCandidate, SearchStrategy
 from ..utils import derived_object
@@ -18,6 +17,10 @@ if TYPE_CHECKING:
 import numpy as np
 import copy
 import random
+import functools
+import operator
+
+from bayes_opt import BayesianOptimization, UtilityFunction
 
 DECISION_TYPE = Any
 
@@ -108,19 +111,70 @@ class BayOptTuner:
     def tune(self):
         print("Tuning has started...")
 
+        pbounds = self.get_parameters_and_constraints()
+        # print(pbounds)
+        # constraints = self.get_constraints()
+
+        optimizer = BayesianOptimization(
+            f=None,
+            pbounds=pbounds,
+            verbose=2,
+            random_state=1,
+        )
+
+        utility = UtilityFunction(kind="ucb", kappa=2.5, xi=0.0)
+
+        # Get the a list of decisions for the entered pbounds
+        next_decisions = optimizer.suggest(utility)
+
+        # Connect the list of next decisions with the instructions
+        decisions: Dict[Instruction, DECISION_TYPE] = self.build_decision_dict(next_decisions)
+
         data: PerThreadData = self.state.per_thread_data_[0]  # Fix this
         sch: Schedule = self.sch
         mod: IRModule = data.mod
 
-        sch.show()
+        self.sch.show()
 
-        for i in range(len(self.sch.trace.decisions)):
-            inst, decision = sch.trace.decisions.items()[i]
+        for i in range(len(decisions)):
+            inst, decision = list(decisions.items())[i]
             new_sch: Schedule = self.apply_decision_to_trace(mod=mod, trace=sch.trace, inst=inst, decision=decision)
             sch = new_sch
 
+        # target = self.optimize_func(next_decisions)
+
+        # optimizer.register(
+        #     params=next_decisions,
+        #     target=target,
+        # )
         sch.show()
         return sch
+
+    def get_parameters_and_constraints(self):
+        pbounds = dict()
+        for inst, decisions in self.sch.trace.decisions.items():
+            if inst.kind.name == "SamplePerfectTile":
+                n_splits: int = int(inst.attrs[0])  # the number of splits
+                max_innermost_factor: int = int(inst.attrs[1])  # the largest inner loop
+
+                # Add early constrain on innermost factor
+                total_loop_iters: int = int(functools.reduce(operator.mul, decisions))
+                if max_innermost_factor > total_loop_iters:
+                    max_innermost_factor = total_loop_iters
+
+                # Add parameters to pbounds
+                for i in range(n_splits):
+                    inst_dec_tag: str = f"{inst.handle}_{i}"
+                    pbounds[inst_dec_tag] = (1, max_innermost_factor)
+
+                # ToDo: Add constraints for sampling
+        return pbounds
+
+    def get_constraints(self):
+        print("PLACEHOLDER")
+
+    def optimize_func(self, decisions: Dict[Instruction, DECISION_TYPE]) -> float:
+        print("PLACEHOLDER")
 
     def apply_decision_to_trace(self, mod: IRModule, trace: Trace,
                                 inst: Instruction, decision: DECISION_TYPE) -> Schedule | None:
@@ -128,6 +182,21 @@ class BayOptTuner:
 
         pp = ThreadedTraceApply(postprocs=self.postprocs)
         return pp.apply(mod=mod, trace=trace, rand_state=1)
+
+    def build_decision_dict(self, next_decisions) -> Dict[Instruction, DECISION_TYPE]:
+        result_decisions: Dict[Instruction, DECISION_TYPE] = dict()
+
+        for inst, decisions in self.sch.trace.decisions.items():
+            if inst.kind.name == "SamplePerfectTile":
+                decision: DECISION_TYPE = []
+
+                for i in range(len(decisions)):
+                    inst_dec_tag: str = f"{inst.handle}_{i}"
+                    decision.append(int(next_decisions[inst_dec_tag]))
+
+                result_decisions[inst] = decision
+
+        return result_decisions
 
 
 class State:
