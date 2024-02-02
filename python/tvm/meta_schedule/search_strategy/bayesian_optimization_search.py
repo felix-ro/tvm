@@ -21,6 +21,7 @@ import functools
 import operator
 
 from bayes_opt import BayesianOptimization, UtilityFunction
+# from scipy.optimize import NonlinearConstraint
 
 DECISION_TYPE = Any
 
@@ -107,13 +108,26 @@ class BayOptTuner:
         self.sch: Schedule = sch
         self.postprocs = state.search_strategy.postprocs
         self.state: State = state
+        self.context = state.context
+        self.cost_model = state.cost_model
+        self.max_trials = 10
 
     def tune(self):
         print("Tuning has started...")
 
-        pbounds = self.get_parameters_and_constraints()
-        # print(pbounds)
-        # constraints = self.get_constraints()
+        pre_tuning_score = predict_normalized_score(candidates=[self.sch],
+                                                    context=self.context,
+                                                    cost_model=self.cost_model)
+        print(f"Pre tuning score: {pre_tuning_score[0]}")
+
+        pbounds, constraints = self.get_parameters_and_constraints()
+
+        # Check if there are any tunable instructions
+        if len(pbounds) == 0:
+            return self.sch
+
+        # constraint_func = self.constraint_factory(constraints)
+        # constraint = NonlinearConstraint(constraint_func, -np.inf, np.inf)
 
         optimizer = BayesianOptimization(
             f=None,
@@ -124,35 +138,81 @@ class BayOptTuner:
 
         utility = UtilityFunction(kind="ucb", kappa=2.5, xi=0.0)
 
-        # Get the a list of decisions for the entered pbounds
-        next_decisions = optimizer.suggest(utility)
+        current_trial: int = 0
+        while (current_trial < self.max_trials):
+            print(f"Current trial: {current_trial}")
+            # Get the a list of decisions for the entered pbounds
+            next_decisions = optimizer.suggest(utility)
 
-        # Connect the list of next decisions with the instructions
-        decisions: Dict[Instruction, DECISION_TYPE] = self.build_decision_dict(next_decisions)
+            # Connect the list of next decisions with the instructions
+            decisions: Dict[Instruction, DECISION_TYPE] = self.build_decision_dict(next_decisions)
 
+            data: PerThreadData = self.state.per_thread_data_[0]  # Fix this
+            sch: Schedule = self.sch
+            mod: IRModule = data.mod
+
+            # Apply the decisions to the trace
+            # sch.trace.show()
+            for i in range(len(decisions)):
+                inst, decision = list(decisions.items())[i]
+
+                # retracing the graph changes instruction handles need to find instruction in trace after each iteration
+                matched_inst = self.find_matching_instruction(sch=sch, inst=inst)
+
+                new_sch: Schedule = self.apply_decision_to_trace(mod=mod,
+                                                                 trace=sch.trace,
+                                                                 inst=matched_inst,
+                                                                 decision=decision)
+                sch = new_sch
+
+            # sch.trace.show()
+
+            # predict schedule score
+            target = self.optimize_func(sch)
+
+            # register score with optimizer, to improve next prediction
+            optimizer.register(
+                params=next_decisions,
+                target=target,
+            )
+            current_trial += 1
+
+        # Get the best decisions construct schedule again
+        post_tuning_score = optimizer.max['target']
+        print(f"Post tuning score: {post_tuning_score}")
+
+        # If worse than untuned, return original schedule
+        if (post_tuning_score < pre_tuning_score):
+            return self.sch
+
+        # Construct Schedule from best decisions found with BayOpt
+        best_decisions: Dict[Instruction, DECISION_TYPE] = self.build_decision_dict(optimizer.max["params"])
         data: PerThreadData = self.state.per_thread_data_[0]  # Fix this
         sch: Schedule = self.sch
         mod: IRModule = data.mod
-
-        self.sch.show()
-
-        for i in range(len(decisions)):
-            inst, decision = list(decisions.items())[i]
-            new_sch: Schedule = self.apply_decision_to_trace(mod=mod, trace=sch.trace, inst=inst, decision=decision)
+        for i in range(len(best_decisions)):
+            inst, decision = list(best_decisions.items())[i]
+            new_sch: Schedule = self.apply_decision_to_trace(mod=mod,
+                                                             trace=sch.trace,
+                                                             inst=inst,
+                                                             decision=decision)
             sch = new_sch
-
-        # target = self.optimize_func(next_decisions)
-
-        # optimizer.register(
-        #     params=next_decisions,
-        #     target=target,
-        # )
-        sch.show()
         return sch
+
+    @staticmethod
+    def find_matching_instruction(sch: Schedule, inst: Instruction):
+        for new_inst, _ in sch.trace.decisions.items():
+            # print(f"{inst.outputs}, {new_inst.outputs}, same {str(new_inst.outputs) == str(inst.outputs)}")
+            if str(new_inst.outputs) == str(inst.outputs):
+                # print("matched")
+                return new_inst
 
     def get_parameters_and_constraints(self):
         pbounds = dict()
+        constraints = dict()
+        # self.sch.trace.show()
         for inst, decisions in self.sch.trace.decisions.items():
+            # print(inst.outputs, inst, decisions)
             if inst.kind.name == "SamplePerfectTile":
                 n_splits: int = int(inst.attrs[0])  # the number of splits
                 max_innermost_factor: int = int(inst.attrs[1])  # the largest inner loop
@@ -166,19 +226,20 @@ class BayOptTuner:
                 for i in range(n_splits):
                     inst_dec_tag: str = f"{inst.handle}_{i}"
                     pbounds[inst_dec_tag] = (1, max_innermost_factor)
+                constraints[str(inst.handle)] = (n_splits, total_loop_iters)
 
-                # ToDo: Add constraints for sampling
-        return pbounds
+        return pbounds, constraints
 
-    def get_constraints(self):
-        print("PLACEHOLDER")
-
-    def optimize_func(self, decisions: Dict[Instruction, DECISION_TYPE]) -> float:
-        print("PLACEHOLDER")
+    def optimize_func(self, sch: Schedule) -> float:
+        sch: List[Schedule] = [sch]
+        score = predict_normalized_score(candidates=sch,
+                                         context=self.context,
+                                         cost_model=self.cost_model)
+        return score[0]
 
     def apply_decision_to_trace(self, mod: IRModule, trace: Trace,
                                 inst: Instruction, decision: DECISION_TYPE) -> Schedule | None:
-        trace.with_decision(inst=inst, decision=decision, remove_postproc=True)
+        trace = trace.with_decision(inst=inst, decision=decision, remove_postproc=True)
 
         pp = ThreadedTraceApply(postprocs=self.postprocs)
         return pp.apply(mod=mod, trace=trace, rand_state=1)
@@ -197,6 +258,17 @@ class BayOptTuner:
                 result_decisions[inst] = decision
 
         return result_decisions
+
+    @staticmethod
+    def constraint_factory(constraints):
+        def constraint_function(x):
+            constrain_list = []
+
+            for constraint in constraints:
+                print(constraint)
+                constrain_list.append(x[0] * x[1] == constraint)
+            return np.array(constrain_list)
+        return constraint_function
 
 
 class State:
