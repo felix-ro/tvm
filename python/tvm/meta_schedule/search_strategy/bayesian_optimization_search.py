@@ -109,7 +109,7 @@ class BayOptTuner:
         self.postprocs = state.search_strategy.postprocs
         self.state: State = state
         self.context = state.context
-        self.cost_model = state.cost_model
+        self.cost_model: CostModel = state.cost_model
         self.max_trials = 10
 
     def tune(self):
@@ -153,9 +153,7 @@ class BayOptTuner:
 
             # Apply the decisions to the trace
             # sch.trace.show()
-            for i in range(len(decisions)):
-                inst, decision = list(decisions.items())[i]
-
+            for inst, decision in list(decisions.items()):
                 # retracing the graph changes instruction handles need to find instruction in trace after each iteration
                 matched_inst = self.find_matching_instruction(sch=sch, inst=inst)
 
@@ -164,8 +162,8 @@ class BayOptTuner:
                                                                  inst=matched_inst,
                                                                  decision=decision)
                 sch = new_sch
-
             # sch.trace.show()
+            # return
 
             # predict schedule score
             target = self.optimize_func(sch)
@@ -190,8 +188,7 @@ class BayOptTuner:
         data: PerThreadData = self.state.per_thread_data_[0]  # Fix this
         sch: Schedule = self.sch
         mod: IRModule = data.mod
-        for i in range(len(best_decisions)):
-            inst, decision = list(best_decisions.items())[i]
+        for inst, decision in list(best_decisions.items()):
             new_sch: Schedule = self.apply_decision_to_trace(mod=mod,
                                                              trace=sch.trace,
                                                              inst=inst,
@@ -335,8 +332,13 @@ class State:
         top_k_schedules = self.get_top_k_schedules(unmeasured_schedules, sample_num)
 
         # Testing tuning start
-        bay_opt_tuner = BayOptTuner(top_k_schedules[0], self)
-        top_k_schedules[0] = bay_opt_tuner.tune()
+        def f_proc_bay_opt_tune(id: int):
+            bay_opt_tuner = BayOptTuner(top_k_schedules[id], self)
+            top_k_schedules[id] = bay_opt_tuner.tune()
+
+        # ToDo: good threading opportunity
+        for id in range(10):
+            f_proc_bay_opt_tune(id=id)
         # Testing tuning end
 
         return assemble_candidates(top_k_schedules)
