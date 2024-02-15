@@ -7,12 +7,11 @@ from ..utils import derived_object
 from ..arg_info import ArgInfo
 from ..runner import RunnerResult
 from ..logging import get_logger, get_logging_func
-from ..database import TuningRecord
 from ..profiler import Profiler
 
 if TYPE_CHECKING:
     from ..cost_model import CostModel
-    from ..database import Database
+    from ..database import Database, TuningRecord
     from ..tune_context import TuneContext
 
     ATTR_TYPE = Any
@@ -27,7 +26,8 @@ import inspect
 from itertools import permutations
 
 from bayes_opt import BayesianOptimization, UtilityFunction
-# from scipy.optimize import NonlinearConstraint
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
 
 DECISION_TYPE = Any
 
@@ -315,10 +315,6 @@ class BayOptTuner:
                 decision_key = self.instruction_decsion_map[f"{inst.handle}"]
                 possible_decisions = self.decision_lookup[decision_key]
                 predicted_index = int(next_decisions[f"{inst.handle}"])
-
-                # print(predicted_index)
-                # print(type(possible_decisions[predicted_index]))
-                # print(possible_decisions[predicted_index])
                 result_decisions[inst] = possible_decisions[predicted_index]
 
         return result_decisions
@@ -419,18 +415,22 @@ class State:
         # Pick top-k best schedules using cost func to avoid measuring all schedules
         top_k_schedules = self.get_top_k_schedules(unmeasured_schedules, sample_num)
 
-        # Testing tuning start
-        def f_proc_bay_opt_tune(id: int):
-            bay_opt_tuner = BayOptTuner(top_k_schedules[id], self)
-            top_k_schedules[id] = bay_opt_tuner.tune()
-
-        # ToDo: good threading opportunity
-        num_sch_to_tuner = 10
+        num_sch_to_tuner = 64
         self.logger(logging.INFO, __name__, current_line_number(),
                     f"Sending {num_sch_to_tuner} schedule(s) to bayesian optimization tuner")
-        for id in range(num_sch_to_tuner):
-            f_proc_bay_opt_tune(id=id)
-        # Testing tuning end
+
+        def f_proc_bay_opt_tune(id: int):
+            bay_opt_tuner = BayOptTuner(top_k_schedules[id], self)
+            return id, bay_opt_tuner.tune()
+
+        with ThreadPoolExecutor(max_workers=self.context.num_threads) as executor:
+            # Submit all tasks to the executor
+            futures = [executor.submit(f_proc_bay_opt_tune, id) for id in range(num_sch_to_tuner)]
+
+            # Process future results as they complete
+            for future in as_completed(futures):
+                id, result = future.result()
+                top_k_schedules[id] = result
 
         return assemble_candidates(top_k_schedules)
 
