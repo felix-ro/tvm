@@ -383,6 +383,28 @@ class State:
                         f"Picked {len(results)} schedules from database")
             return results
 
+    def epsilon_greedy_mix(self, exploit_list, explore_list, epsilon, num):
+        num_explore_schedules = 0
+        mixed_list = []
+        for _ in range(num):
+            if random.random() > epsilon:  # Exploitation
+                if exploit_list:  # Check if the list is not empty
+                    mixed_list.append(random.choice(exploit_list))
+            else:  # Exploration
+                if explore_list:
+                    mixed_list.append(random.choice(explore_list))
+                    num_explore_schedules += 1
+
+        # If we don't have measured candidates yet we fill with random
+        if len(mixed_list) < num:
+            for _ in range(num - len(mixed_list)):
+                mixed_list.append(random.choice(explore_list))
+                num_explore_schedules += 1
+
+        self.logger(logging.INFO, __name__, current_line_number(),
+                    f"Epsilon Greedy mixed {num_explore_schedules} random schedules into tuning/runner set")
+        return mixed_list
+
     def generate_measure_candidates(self) -> Optional[List[MeasureCandidate]]:
         # Check if there are any trials left
         if (self.st >= self.max_trials):
@@ -413,14 +435,15 @@ class State:
                     f"Prepared a population of {len(combined_schedules)} schedules for measurement")
 
         # Pick top-k best schedules using cost func to avoid measuring all schedules
-        top_k_schedules = self.get_top_k_schedules(unmeasured_schedules, sample_num)
+        tune_schedules = self.epsilon_greedy_mix(measured_schedules, unmeasured_schedules, 0.1, sample_num)
+        # top_k_schedules = self.get_top_k_schedules(unmeasured_schedules, sample_num)
 
         num_sch_to_tuner = 64
         self.logger(logging.INFO, __name__, current_line_number(),
                     f"Sending {num_sch_to_tuner} schedule(s) to bayesian optimization tuner")
 
         def f_proc_bay_opt_tune(id: int):
-            bay_opt_tuner = BayOptTuner(top_k_schedules[id], self)
+            bay_opt_tuner = BayOptTuner(tune_schedules[id], self)
             return id, bay_opt_tuner.tune()
 
         with ThreadPoolExecutor(max_workers=self.context.num_threads) as executor:
@@ -430,9 +453,10 @@ class State:
             # Process future results as they complete
             for future in as_completed(futures):
                 id, result = future.result()
-                top_k_schedules[id] = result
+                tune_schedules[id] = result
 
-        return assemble_candidates(top_k_schedules)
+        run_schedules = self.epsilon_greedy_mix(tune_schedules, unmeasured_schedules, 0.1, sample_num)
+        return assemble_candidates(run_schedules)
 
     def sample_initial_population(self, num_traces: int) -> List[Schedule]:
         with Profiler.timeit("BayOptSearch/GenerateCandidates/SamplePopulation"):
