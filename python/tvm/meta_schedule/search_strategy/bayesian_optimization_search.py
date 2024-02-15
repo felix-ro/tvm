@@ -6,6 +6,8 @@ from .search_strategy import PySearchStrategy, MeasureCandidate, SearchStrategy
 from ..utils import derived_object
 from ..arg_info import ArgInfo
 from ..runner import RunnerResult
+from ..logging import get_logger, get_logging_func
+
 
 if TYPE_CHECKING:
     from ..cost_model import CostModel
@@ -19,12 +21,18 @@ import copy
 import random
 import functools
 import operator
+import logging
+import inspect
 from itertools import permutations
 
 from bayes_opt import BayesianOptimization, UtilityFunction
 # from scipy.optimize import NonlinearConstraint
 
 DECISION_TYPE = Any
+
+
+def current_line_number():
+    return inspect.currentframe().f_back.f_lineno
 
 
 def forkseed(rand_state):
@@ -327,6 +335,7 @@ class State:
         self.search_strategy: BayesianOptimizationSearch = search_strategy
         self.context = context
         self.mod = context.mod
+        self.logger = get_logging_func(get_logger(__name__))
 
         self.design_spaces = []
         for space in self.design_space_schedules:
@@ -378,7 +387,10 @@ class State:
             top_k_schedules[id] = bay_opt_tuner.tune()
 
         # ToDo: good threading opportunity
-        for id in range(10):
+        num_sch_to_tuner = 10
+        self.logger(logging.INFO, __name__, current_line_number(),
+                    f"Sending {num_sch_to_tuner} schedule(s) to bayesian optimization tuner")
+        for id in range(num_sch_to_tuner):
             f_proc_bay_opt_tune(id=id)
         # Testing tuning end
 
@@ -416,6 +428,8 @@ class State:
                     found_new = True
                     output_schedules.append(results[i])
             fail_count += not found_new
+            self.logger(logging.INFO, __name__, current_line_number(),
+                        f"Sampled Initial Population of size: {len(output_schedules)}")
             return output_schedules
 
     def get_top_k_schedules(self, schedules: List[Schedule], k: int) -> List[Schedule]:
