@@ -7,7 +7,7 @@ from ..utils import derived_object
 from ..arg_info import ArgInfo
 from ..runner import RunnerResult
 from ..logging import get_logger, get_logging_func
-
+from ..database import TuningRecord
 
 if TYPE_CHECKING:
     from ..cost_model import CostModel
@@ -109,6 +109,24 @@ def get_all_combinations_fixed(x, n):
     return list(unique_combinations)
 
 
+def process_database_trace(trace_id, per_thread_data, picked_traces, pp: "ThreadedTraceApply", results, num_threads):
+    thread_id = trace_id % num_threads
+    data = per_thread_data[thread_id]
+    rand_state = data.rand_state
+    mod = data.mod
+
+    trace = picked_traces[trace_id]
+    result = results[trace_id]
+    assert result is None, f"result {trace_id} should be None"
+
+    sch: Schedule = pp.apply(mod=mod, trace=trace, rand_state=rand_state)
+
+    if sch is not None:
+        results[trace_id] = sch
+    else:
+        raise ValueError(f"Could not post-process trace from database:\n{trace}")
+
+
 class ThreadedTraceApply:
     class Item:
         postproc = None
@@ -121,7 +139,7 @@ class ThreadedTraceApply:
         self.n_ = len(postprocs)
         self.items_ = [self.Item(postprocs[i]) for i in range(self.n_)]
 
-    def apply(self, mod: IRModule, trace: Trace, rand_state: np.int64):
+    def apply(self, mod: IRModule, trace: Trace, rand_state: np.int64) -> (Schedule | None):
         sch = Schedule(mod=mod,
                        seed=forkseed(rand_state),
                        debug_mask=0,
@@ -351,12 +369,34 @@ class State:
             self.per_thread_data_[i].mod = copy.deepcopy(self.mod)
             self.per_thread_data_[i].rand_state = forkseed(self.search_strategy.rand_state)
 
+        self.workload = database.commit_workload(self.mod)
+
     def reset(self):
         self.max_trials = None
         self.num_trials_per_iter = None
         self.design_spaces = None
         self.database = None
         self.cost_model = None
+
+    def pick_best_from_database(self, num: int) -> List[Schedule]:
+        picked_traces: List[Trace] = []
+        # Load top k tuning records for a workload from database
+        tuning_records: List[TuningRecord] = self.database.get_top_k(self.workload, num)
+
+        for record in tuning_records:
+            picked_traces.append(record.trace)
+
+        # Get the actual number of picked traces, (there may have not been enough in the database)
+        actual_num_picked = len(picked_traces)
+        pp: ThreadedTraceApply = ThreadedTraceApply(self.search_strategy.postprocs)
+
+        results: List[Schedule] = [None] * actual_num_picked
+        for i in range(actual_num_picked):
+            # f_proc_measured(i, self.per_thread_data_, measured_traces, pp, results,self.context.num_threads)
+            process_database_trace(i, self.per_thread_data_, picked_traces, pp, results, self.context.num_threads)
+        self.logger(logging.INFO, __name__, current_line_number(),
+                    f"Picked {len(results)} schedules from database")
+        return results
 
     def generate_measure_candidates(self) -> Optional[List[MeasureCandidate]]:
         # Check if there are any trials left
@@ -371,12 +411,21 @@ class State:
 
         assert self.st < self.ed, f"check failed: {self.st} < {self.ed}"
 
+        # Top measured database schedules
+        num_measured_schedules = int(self.search_strategy.population_size * self.search_strategy.init_measured_ratio)
+        measured_schedules: List[Schedule] = self.pick_best_from_database(num_measured_schedules)
+
         # Sample a new population of random schedules
-        unmeasured_schedules: List[Schedule] = self.sample_initial_population(self.search_strategy.population_size)
+        num_unmeasured_schedules = self.search_strategy.population_size - len(measured_schedules)
+        unmeasured_schedules: List[Schedule] = self.sample_initial_population(num_unmeasured_schedules)
 
         # Check if minimum amount of schedules were sampled
         if (len(unmeasured_schedules) < self.search_strategy.init_min_unmeasured):
             raise ValueError  # Specify a better error here
+
+        combined_schedules: List[Schedule] = measured_schedules + unmeasured_schedules
+        self.logger(logging.INFO, __name__, current_line_number(),
+                    f"Prepared a population of {len(combined_schedules)} schedules for measurement")
 
         # Pick top-k best schedules using cost func to avoid measuring all schedules
         top_k_schedules = self.get_top_k_schedules(unmeasured_schedules, sample_num)
@@ -429,7 +478,7 @@ class State:
                     output_schedules.append(results[i])
             fail_count += not found_new
             self.logger(logging.INFO, __name__, current_line_number(),
-                        f"Sampled Initial Population of size: {len(output_schedules)}")
+                        f"Sampled {len(output_schedules)} new random schedules")
             return output_schedules
 
     def get_top_k_schedules(self, schedules: List[Schedule], k: int) -> List[Schedule]:
