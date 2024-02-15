@@ -8,6 +8,7 @@ from ..arg_info import ArgInfo
 from ..runner import RunnerResult
 from ..logging import get_logger, get_logging_func
 from ..database import TuningRecord
+from ..profiler import Profiler
 
 if TYPE_CHECKING:
     from ..cost_model import CostModel
@@ -73,40 +74,41 @@ def predict_normalized_score(candidates, context, cost_model):
     return scores
 
 
-def get_all_combinations_fixed(x, n):
-    """Generates all unique combinations of n integers whose product equals x, with fixes for x=1."""
-    # Special case handling for x=1
-    if x == 1:
-        return [(1,) * n]  # Return a list with a single tuple of n 1s
+def get_possible_tiling_decisions(tile_product, num_tiles):
+    """Generates all unique combinations of num_tiles integers whose product equals tile_product"""
+    with Profiler.timeit("BayOptSearch/Tuner/Tune/GetPossibleTilingDecisions"):
+        # Special case handling for x=1
+        if tile_product == 1:
+            return [(1,) * num_tiles]  # Return a list with a single tuple of n 1s
 
-    # Base case handling
-    if x < 0:
-        return "No solution for negative X with only positive integers."
-    if n <= 0:
-        return "Invalid n. n must be greater than 0."
+        # Base case handling
+        if tile_product < 0:
+            return "No solution for negative X with only positive integers."
+        if num_tiles <= 0:
+            return "Invalid n. n must be greater than 0."
 
-    def factor_combinations(x, start=2, current=[]):
-        """Recursively find all factor combinations of x."""
-        if x == 1 and len(current) > 0:
-            yield current
-        else:
-            for i in range(start, x + 1):
-                if x % i == 0:
-                    yield from factor_combinations(x // i, i, current + [i])
+        def factor_combinations(x, start=2, current=[]):
+            """Recursively find all factor combinations of x."""
+            if x == 1 and len(current) > 0:
+                yield current
+            else:
+                for i in range(start, x + 1):
+                    if x % i == 0:
+                        yield from factor_combinations(x // i, i, current + [i])
 
-    # Generate all factor combinations
-    all_factors = list(factor_combinations(x))
+        # Generate all factor combinations
+        all_factors = list(factor_combinations(tile_product))
 
-    # Generate all unique combinations of n elements
-    unique_combinations = set()
-    for factors in all_factors:
-        if len(factors) <= n:
-            padded_factors = factors + [1] * (n - len(factors))  # Pad with 1s if necessary
-            # Generate all permutations of padded_factors to ensure uniqueness
-            for perm in set(permutations(padded_factors)):
-                unique_combinations.add(perm)
+        # Generate all unique combinations of n elements
+        unique_combinations = set()
+        for factors in all_factors:
+            if len(factors) <= num_tiles:
+                padded_factors = factors + [1] * (num_tiles - len(factors))  # Pad with 1s if necessary
+                # Generate all permutations of padded_factors to ensure uniqueness
+                for perm in set(permutations(padded_factors)):
+                    unique_combinations.add(perm)
 
-    return list(unique_combinations)
+        return list(unique_combinations)
 
 
 def process_database_trace(trace_id, per_thread_data, picked_traces, pp: "ThreadedTraceApply", results, num_threads):
@@ -178,87 +180,89 @@ class BayOptTuner:
         self.instruction_decsion_map = dict()
 
     def tune(self):
-        pre_tuning_score = predict_normalized_score(candidates=[self.sch],
-                                                    context=self.context,
-                                                    cost_model=self.cost_model)[0]
-        pbounds = self.get_parameters()
+        with Profiler.timeit("BayOptSearch/Tuner/Tune"):
+            pre_tuning_score = predict_normalized_score(candidates=[self.sch],
+                                                        context=self.context,
+                                                        cost_model=self.cost_model)[0]
+            pbounds = self.get_parameters()
 
-        # Check if there are any tunable instructions
-        if len(pbounds) == 0:
+            # Check if there are any tunable instructions
+            if len(pbounds) == 0:
+                self.state.logger(logging.DEBUG, __name__, current_line_number(),
+                                  "No tuneable decision was found in trace")
+                return self.sch
+
+            optimizer = BayesianOptimization(
+                f=None,
+                pbounds=pbounds,
+                verbose=2,
+                random_state=1,
+            )
+
+            utility = UtilityFunction(kind="ucb", kappa=2.5, xi=0.0)
+
+            # self.sch.show()
+            with Profiler.timeit("BayOptSearch/Tuner/Tune/Iterating"):
+                current_trial: int = 0
+                while (current_trial < self.max_trials):
+                    # print(f"Current trial: {current_trial}")
+                    # Get the a list of decisions for the entered pbounds
+                    next_decisions = optimizer.suggest(utility)
+
+                    # Connect the list of next decisions with the instructions
+                    decisions: Dict[Instruction, DECISION_TYPE] = self.build_decision_dict(next_decisions)
+
+                    data: PerThreadData = self.state.per_thread_data_[0]  # Fix this
+                    sch: Schedule = self.sch
+                    mod: IRModule = data.mod
+
+                    # Apply the decisions to the trace
+                    # sch.trace.show()
+                    for inst, decision in list(decisions.items()):
+                        # Retracing the graph changes instruction handles
+                        # We need to find instruction in trace after each iteration
+                        matched_inst = self.find_matching_instruction(sch=sch, inst=inst)
+
+                        new_sch: Schedule = self.apply_decision_to_trace(mod=mod,
+                                                                         trace=sch.trace,
+                                                                         inst=matched_inst,
+                                                                         decision=decision)
+                        sch = new_sch
+                    # sch.trace.show()
+                    # return
+
+                    # predict schedule score
+                    target = self.optimize_func(sch)
+                    # print(target)
+                    # register score with optimizer, to improve next prediction
+                    optimizer.register(
+                        params=next_decisions,
+                        target=target,
+                    )
+                    current_trial += 1
+
+            # Get the best decisions construct schedule again
+            post_tuning_score = optimizer.max['target']
             self.state.logger(logging.DEBUG, __name__, current_line_number(),
-                              "No tuneable decision was found in trace")
-            return self.sch
+                              f"Pre tuning score: {pre_tuning_score} ==> Post tuning score: {post_tuning_score}")
 
-        optimizer = BayesianOptimization(
-            f=None,
-            pbounds=pbounds,
-            verbose=2,
-            random_state=1,
-        )
+            # If worse than untuned, return original schedule
+            if (post_tuning_score < pre_tuning_score):
+                return self.sch
 
-        utility = UtilityFunction(kind="ucb", kappa=2.5, xi=0.0)
-
-        # self.sch.show()
-        current_trial: int = 0
-        while (current_trial < self.max_trials):
-            # print(f"Current trial: {current_trial}")
-            # Get the a list of decisions for the entered pbounds
-            next_decisions = optimizer.suggest(utility)
-
-            # Connect the list of next decisions with the instructions
-            decisions: Dict[Instruction, DECISION_TYPE] = self.build_decision_dict(next_decisions)
-
+            # Construct Schedule from best decisions found with BayOpt
+            best_decisions: Dict[Instruction, DECISION_TYPE] = self.build_decision_dict(optimizer.max["params"])
             data: PerThreadData = self.state.per_thread_data_[0]  # Fix this
             sch: Schedule = self.sch
             mod: IRModule = data.mod
-
-            # Apply the decisions to the trace
-            # sch.trace.show()
-            for inst, decision in list(decisions.items()):
-                # retracing the graph changes instruction handles need to find instruction in trace after each iteration
-                matched_inst = self.find_matching_instruction(sch=sch, inst=inst)
-
+            for inst, decision in list(best_decisions.items()):
                 new_sch: Schedule = self.apply_decision_to_trace(mod=mod,
                                                                  trace=sch.trace,
-                                                                 inst=matched_inst,
+                                                                 inst=inst,
                                                                  decision=decision)
                 sch = new_sch
-            # sch.trace.show()
-            # return
-
-            # predict schedule score
-            target = self.optimize_func(sch)
-            # print(target)
-            # register score with optimizer, to improve next prediction
-            optimizer.register(
-                params=next_decisions,
-                target=target,
-            )
-            current_trial += 1
-
-        # Get the best decisions construct schedule again
-        post_tuning_score = optimizer.max['target']
-        self.state.logger(logging.DEBUG, __name__, current_line_number(),
-                          f"Pre tuning score: {pre_tuning_score} ==> Post tuning score: {post_tuning_score}")
-
-        # If worse than untuned, return original schedule
-        if (post_tuning_score < pre_tuning_score):
-            return self.sch
-
-        # Construct Schedule from best decisions found with BayOpt
-        best_decisions: Dict[Instruction, DECISION_TYPE] = self.build_decision_dict(optimizer.max["params"])
-        data: PerThreadData = self.state.per_thread_data_[0]  # Fix this
-        sch: Schedule = self.sch
-        mod: IRModule = data.mod
-        for inst, decision in list(best_decisions.items()):
-            new_sch: Schedule = self.apply_decision_to_trace(mod=mod,
-                                                             trace=sch.trace,
-                                                             inst=inst,
-                                                             decision=decision)
-            sch = new_sch
-        # sch.show()
-        # return
-        return sch
+            # sch.show()
+            return sch
 
     @staticmethod
     def find_matching_instruction(sch: Schedule, inst: Instruction):
@@ -277,7 +281,7 @@ class BayOptTuner:
                 n_splits: int = int(inst.attrs[0])
                 total_loop_iters: int = int(functools.reduce(operator.mul, decisions))
 
-                possible_decisions = get_all_combinations_fixed(total_loop_iters, n_splits)
+                possible_decisions = get_possible_tiling_decisions(total_loop_iters, n_splits)
                 # print(n_splits, total_loop_iters, possible_decisions)
 
                 decision_key = ("SamplePerfectTile", n_splits, total_loop_iters)
@@ -318,17 +322,6 @@ class BayOptTuner:
                 result_decisions[inst] = possible_decisions[predicted_index]
 
         return result_decisions
-
-    @staticmethod
-    def constraint_factory(constraints):
-        def constraint_function(x):
-            constrain_list = []
-
-            for constraint in constraints:
-                print(constraint)
-                constrain_list.append(x[0] * x[1] == constraint)
-            return np.array(constrain_list)
-        return constraint_function
 
 
 class State:
@@ -375,23 +368,24 @@ class State:
         self.cost_model = None
 
     def pick_best_from_database(self, num: int) -> List[Schedule]:
-        picked_traces: List[Trace] = []
-        # Load top k tuning records for a workload from database
-        tuning_records: List[TuningRecord] = self.database.get_top_k(self.workload, num)
+        with Profiler.timeit("BayOptSearch/GenerateCandidates/PickBestFromDatabase"):
+            picked_traces: List[Trace] = []
+            # Load top k tuning records for a workload from database
+            tuning_records: List[TuningRecord] = self.database.get_top_k(self.workload, num)
 
-        for record in tuning_records:
-            picked_traces.append(record.trace)
+            for record in tuning_records:
+                picked_traces.append(record.trace)
 
-        # Get the actual number of picked traces, (there may have not been enough in the database)
-        actual_num_picked = len(picked_traces)
-        pp: ThreadedTraceApply = ThreadedTraceApply(self.search_strategy.postprocs)
+            # Get the actual number of picked traces, (there may have not been enough in the database)
+            actual_num_picked = len(picked_traces)
+            pp: ThreadedTraceApply = ThreadedTraceApply(self.search_strategy.postprocs)
 
-        results: List[Schedule] = [None] * actual_num_picked
-        for i in range(actual_num_picked):
-            process_database_trace(i, self.per_thread_data_, picked_traces, pp, results, self.context.num_threads)
-        self.logger(logging.INFO, __name__, current_line_number(),
-                    f"Picked {len(results)} schedules from database")
-        return results
+            results: List[Schedule] = [None] * actual_num_picked
+            for i in range(actual_num_picked):
+                process_database_trace(i, self.per_thread_data_, picked_traces, pp, results, self.context.num_threads)
+            self.logger(logging.INFO, __name__, current_line_number(),
+                        f"Picked {len(results)} schedules from database")
+            return results
 
     def generate_measure_candidates(self) -> Optional[List[MeasureCandidate]]:
         # Check if there are any trials left
@@ -441,49 +435,51 @@ class State:
         return assemble_candidates(top_k_schedules)
 
     def sample_initial_population(self, num_traces: int) -> List[Schedule]:
-        postproc = ThreadedTraceApply(self.search_strategy.postprocs)
-        output_schedules: List[Schedule] = []
-        fail_count: int = 0
-        while (fail_count < self.search_strategy.max_fail_count and
-               len(output_schedules) < self.search_strategy.init_min_unmeasured):
+        with Profiler.timeit("BayOptSearch/GenerateCandidates/SamplePopulation"):
+            postproc = ThreadedTraceApply(self.search_strategy.postprocs)
+            output_schedules: List[Schedule] = []
+            fail_count: int = 0
+            while (fail_count < self.search_strategy.max_fail_count and
+                   len(output_schedules) < self.search_strategy.init_min_unmeasured):
 
-            results = [None] * num_traces
+                results = [None] * num_traces
 
-            def f_proc_unmeasured(thread_id: int, trace_id: int):
-                thread_id = thread_id % self.context.num_threads
-                data: PerThreadData = self.per_thread_data_[thread_id]
-                rand_state: np.int64 = data.rand_state
-                mod: IRModule = data.mod
+                def f_proc_unmeasured(thread_id: int, trace_id: int):
+                    thread_id = thread_id % self.context.num_threads
+                    data: PerThreadData = self.per_thread_data_[thread_id]
+                    rand_state: np.int64 = data.rand_state
+                    mod: IRModule = data.mod
 
-                assert results[trace_id] is None, f"results {trace_id} should be None"
+                    assert results[trace_id] is None, f"results {trace_id} should be None"
 
-                design_space_index: int = sample_int(rand_state, 0, len(self.design_spaces))
-                trace: Trace = Trace(self.design_spaces[design_space_index].insts, {})
-                sch: Schedule = postproc.apply(mod=mod, trace=trace, rand_state=rand_state)
-                if (sch is not None):
-                    results[trace_id] = sch
+                    design_space_index: int = sample_int(rand_state, 0, len(self.design_spaces))
+                    trace: Trace = Trace(self.design_spaces[design_space_index].insts, {})
+                    sch: Schedule = postproc.apply(mod=mod, trace=trace, rand_state=rand_state)
+                    if (sch is not None):
+                        results[trace_id] = sch
 
-            for i in range(num_traces):
-                f_proc_unmeasured(i, i)
+                for i in range(num_traces):
+                    f_proc_unmeasured(i, i)
 
-            found_new: bool = False
-            for i in range(num_traces):
-                if (results[i] is not None):
-                    found_new = True
-                    output_schedules.append(results[i])
-            fail_count += not found_new
-            self.logger(logging.INFO, __name__, current_line_number(),
-                        f"Sampled {len(output_schedules)} new random schedules")
-            return output_schedules
+                found_new: bool = False
+                for i in range(num_traces):
+                    if (results[i] is not None):
+                        found_new = True
+                        output_schedules.append(results[i])
+                fail_count += not found_new
+                self.logger(logging.INFO, __name__, current_line_number(),
+                            f"Sampled {len(output_schedules)} new random schedules")
+                return output_schedules
 
     def get_top_k_schedules(self, schedules: List[Schedule], k: int) -> List[Schedule]:
-        scores = predict_normalized_score(schedules, self.context, self.cost_model)
-        idx = np.argsort(scores)[-k:]
+        with Profiler.timeit("BayOptSearch/GenerateCandidates/GetTopKSchedules"):
+            scores = predict_normalized_score(schedules, self.context, self.cost_model)
+            idx = np.argsort(scores)[-k:]
 
-        top_schedules: List[Schedule] = []
-        for index in idx:
-            top_schedules.append(schedules[index])
-        return top_schedules
+            top_schedules: List[Schedule] = []
+            for index in idx:
+                top_schedules.append(schedules[index])
+            return top_schedules
 
     def notify_runner_results(self, measure_candidates: List[MeasureCandidate], results: List[RunnerResult]):
         self.st += len(results)
