@@ -185,7 +185,7 @@ class BayOptTuner:
 
         # Check if there are any tunable instructions
         if len(pbounds) == 0:
-            self.state.logger(logging.INFO, __name__, current_line_number(),
+            self.state.logger(logging.DEBUG, __name__, current_line_number(),
                               "No tuneable decision was found in trace")
             return self.sch
 
@@ -238,7 +238,7 @@ class BayOptTuner:
 
         # Get the best decisions construct schedule again
         post_tuning_score = optimizer.max['target']
-        self.state.logger(logging.INFO, __name__, current_line_number(),
+        self.state.logger(logging.DEBUG, __name__, current_line_number(),
                           f"Pre tuning score: {pre_tuning_score} ==> Post tuning score: {post_tuning_score}")
 
         # If worse than untuned, return original schedule
