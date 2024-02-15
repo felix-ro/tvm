@@ -178,21 +178,16 @@ class BayOptTuner:
         self.instruction_decsion_map = dict()
 
     def tune(self):
-        print("Tuning has started...")
-
         pre_tuning_score = predict_normalized_score(candidates=[self.sch],
                                                     context=self.context,
-                                                    cost_model=self.cost_model)
-        print(f"Pre tuning score: {pre_tuning_score[0]}")
-
-        pbounds = self.get_parameters_and_constraints()
+                                                    cost_model=self.cost_model)[0]
+        pbounds = self.get_parameters()
 
         # Check if there are any tunable instructions
         if len(pbounds) == 0:
+            self.state.logger(logging.INFO, __name__, current_line_number(),
+                              "No tuneable decision was found in trace")
             return self.sch
-
-        # constraint_func = self.constraint_factory(constraints)
-        # constraint = NonlinearConstraint(constraint_func, -np.inf, np.inf)
 
         optimizer = BayesianOptimization(
             f=None,
@@ -243,7 +238,8 @@ class BayOptTuner:
 
         # Get the best decisions construct schedule again
         post_tuning_score = optimizer.max['target']
-        print(f"Post tuning score: {post_tuning_score}")
+        self.state.logger(logging.INFO, __name__, current_line_number(),
+                          f"Pre tuning score: {pre_tuning_score} ==> Post tuning score: {post_tuning_score}")
 
         # If worse than untuned, return original schedule
         if (post_tuning_score < pre_tuning_score):
@@ -272,7 +268,7 @@ class BayOptTuner:
                 # print("matched")
                 return new_inst
 
-    def get_parameters_and_constraints(self):
+    def get_parameters(self):
         pbounds = dict()
         # self.sch.trace.show()
         for inst, decisions in self.sch.trace.decisions.items():
@@ -310,7 +306,7 @@ class BayOptTuner:
     def build_decision_dict(self, next_decisions) -> Dict[Instruction, DECISION_TYPE]:
         result_decisions: Dict[Instruction, DECISION_TYPE] = dict()
 
-        for inst, decisions in self.sch.trace.decisions.items():
+        for inst, _ in self.sch.trace.decisions.items():
             if inst.kind.name == "SamplePerfectTile":
                 decision_key = self.instruction_decsion_map[f"{inst.handle}"]
                 possible_decisions = self.decision_lookup[decision_key]
@@ -392,7 +388,6 @@ class State:
 
         results: List[Schedule] = [None] * actual_num_picked
         for i in range(actual_num_picked):
-            # f_proc_measured(i, self.per_thread_data_, measured_traces, pp, results,self.context.num_threads)
             process_database_trace(i, self.per_thread_data_, picked_traces, pp, results, self.context.num_threads)
         self.logger(logging.INFO, __name__, current_line_number(),
                     f"Picked {len(results)} schedules from database")
