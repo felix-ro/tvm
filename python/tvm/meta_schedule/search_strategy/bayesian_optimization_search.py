@@ -19,6 +19,7 @@ import copy
 import random
 import functools
 import operator
+from itertools import permutations
 
 from bayes_opt import BayesianOptimization, UtilityFunction
 # from scipy.optimize import NonlinearConstraint
@@ -62,6 +63,42 @@ def predict_normalized_score(candidates, context, cost_model):
     scores = np.clip(scores, 0.0, np.inf)
     # print(f"TLP predict normal score = {scores}")
     return scores
+
+
+def get_all_combinations_fixed(x, n):
+    """Generates all unique combinations of n integers whose product equals x, with fixes for x=1."""
+    # Special case handling for x=1
+    if x == 1:
+        return [(1,) * n]  # Return a list with a single tuple of n 1s
+
+    # Base case handling
+    if x < 0:
+        return "No solution for negative X with only positive integers."
+    if n <= 0:
+        return "Invalid n. n must be greater than 0."
+
+    def factor_combinations(x, start=2, current=[]):
+        """Recursively find all factor combinations of x."""
+        if x == 1 and len(current) > 0:
+            yield current
+        else:
+            for i in range(start, x + 1):
+                if x % i == 0:
+                    yield from factor_combinations(x // i, i, current + [i])
+
+    # Generate all factor combinations
+    all_factors = list(factor_combinations(x))
+
+    # Generate all unique combinations of n elements
+    unique_combinations = set()
+    for factors in all_factors:
+        if len(factors) <= n:
+            padded_factors = factors + [1] * (n - len(factors))  # Pad with 1s if necessary
+            # Generate all permutations of padded_factors to ensure uniqueness
+            for perm in set(permutations(padded_factors)):
+                unique_combinations.add(perm)
+
+    return list(unique_combinations)
 
 
 class ThreadedTraceApply:
@@ -111,6 +148,8 @@ class BayOptTuner:
         self.context = state.context
         self.cost_model: CostModel = state.cost_model
         self.max_trials = 10
+        self.decision_lookup = dict()
+        self.instruction_decsion_map = dict()
 
     def tune(self):
         print("Tuning has started...")
@@ -120,7 +159,7 @@ class BayOptTuner:
                                                     cost_model=self.cost_model)
         print(f"Pre tuning score: {pre_tuning_score[0]}")
 
-        pbounds, constraints = self.get_parameters_and_constraints()
+        pbounds = self.get_parameters_and_constraints()
 
         # Check if there are any tunable instructions
         if len(pbounds) == 0:
@@ -138,9 +177,10 @@ class BayOptTuner:
 
         utility = UtilityFunction(kind="ucb", kappa=2.5, xi=0.0)
 
+        # self.sch.show()
         current_trial: int = 0
         while (current_trial < self.max_trials):
-            print(f"Current trial: {current_trial}")
+            # print(f"Current trial: {current_trial}")
             # Get the a list of decisions for the entered pbounds
             next_decisions = optimizer.suggest(utility)
 
@@ -167,7 +207,7 @@ class BayOptTuner:
 
             # predict schedule score
             target = self.optimize_func(sch)
-
+            # print(target)
             # register score with optimizer, to improve next prediction
             optimizer.register(
                 params=next_decisions,
@@ -194,6 +234,8 @@ class BayOptTuner:
                                                              inst=inst,
                                                              decision=decision)
             sch = new_sch
+        # sch.show()
+        # return
         return sch
 
     @staticmethod
@@ -206,26 +248,24 @@ class BayOptTuner:
 
     def get_parameters_and_constraints(self):
         pbounds = dict()
-        constraints = dict()
         # self.sch.trace.show()
         for inst, decisions in self.sch.trace.decisions.items():
             # print(inst.outputs, inst, decisions)
             if inst.kind.name == "SamplePerfectTile":
-                n_splits: int = int(inst.attrs[0])  # the number of splits
-                max_innermost_factor: int = int(inst.attrs[1])  # the largest inner loop
-
-                # Add early constrain on innermost factor
+                n_splits: int = int(inst.attrs[0])
                 total_loop_iters: int = int(functools.reduce(operator.mul, decisions))
-                if max_innermost_factor > total_loop_iters:
-                    max_innermost_factor = total_loop_iters
 
-                # Add parameters to pbounds
-                for i in range(n_splits):
-                    inst_dec_tag: str = f"{inst.handle}_{i}"
-                    pbounds[inst_dec_tag] = (1, max_innermost_factor)
-                constraints[str(inst.handle)] = (n_splits, total_loop_iters)
+                possible_decisions = get_all_combinations_fixed(total_loop_iters, n_splits)
+                # print(n_splits, total_loop_iters, possible_decisions)
 
-        return pbounds, constraints
+                decision_key = ("SamplePerfectTile", n_splits, total_loop_iters)
+                self.decision_lookup[decision_key] = possible_decisions
+
+                inst_dec_tag: str = f"{inst.handle}"
+                pbounds[inst_dec_tag] = (0, len(possible_decisions) - 1)
+                self.instruction_decsion_map[f"{inst.handle}"] = decision_key
+
+        return pbounds
 
     def optimize_func(self, sch: Schedule) -> float:
         sch: List[Schedule] = [sch]
@@ -246,13 +286,14 @@ class BayOptTuner:
 
         for inst, decisions in self.sch.trace.decisions.items():
             if inst.kind.name == "SamplePerfectTile":
-                decision: DECISION_TYPE = []
+                decision_key = self.instruction_decsion_map[f"{inst.handle}"]
+                possible_decisions = self.decision_lookup[decision_key]
+                predicted_index = int(next_decisions[f"{inst.handle}"])
 
-                for i in range(len(decisions)):
-                    inst_dec_tag: str = f"{inst.handle}_{i}"
-                    decision.append(int(next_decisions[inst_dec_tag]))
-
-                result_decisions[inst] = decision
+                # print(predicted_index)
+                # print(type(possible_decisions[predicted_index]))
+                # print(possible_decisions[predicted_index])
+                result_decisions[inst] = possible_decisions[predicted_index]
 
         return result_decisions
 
