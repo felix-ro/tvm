@@ -207,7 +207,6 @@ class BayOptTuner:
             with Profiler.timeit("BayOptSearch/Tuner/Tune/Iterating"):
                 current_trial: int = 0
                 while (current_trial < self.max_trials):
-                    # print(f"Current trial: {current_trial}")
                     # Get the a list of decisions for the entered pbounds
                     next_decisions = optimizer.suggest(utility)
 
@@ -218,8 +217,8 @@ class BayOptTuner:
                     sch: Schedule = self.sch
                     mod: IRModule = data.mod
 
-                    # Apply the decisions to the trace
                     # sch.trace.show()
+                    # Apply the decisions to the trace
                     for inst, decision in list(decisions.items()):
                         # Retracing the graph changes instruction handles
                         # We need to find instruction in trace after each iteration
@@ -237,9 +236,10 @@ class BayOptTuner:
                         self.state.logger(logging.DEBUG, __name__, current_line_number(),
                                           "Failed to apply tuning decisions to trace")
                         continue
+
                     # predict schedule score
                     target = self.optimize_func(sch)
-                    # print(target)
+
                     # register score with optimizer, to improve next prediction
                     optimizer.register(
                         params=next_decisions,
