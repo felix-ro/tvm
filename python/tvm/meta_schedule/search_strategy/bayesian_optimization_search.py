@@ -286,6 +286,7 @@ class BayOptTuner:
                 total_loop_iters: int = int(functools.reduce(operator.mul, decisions))
 
                 possible_decisions = get_possible_tiling_decisions(total_loop_iters, n_splits)
+                possible_decisions.sort()  # Sort in ascending order, to give the list structure
                 # print(n_splits, total_loop_iters, possible_decisions)
 
                 decision_key = ("SamplePerfectTile", n_splits, total_loop_iters)
