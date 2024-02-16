@@ -32,6 +32,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 DECISION_TYPE = Any
 
 
+decision_lookup = dict()
+
+
 def current_line_number():
     return inspect.currentframe().f_back.f_lineno
 
@@ -176,7 +179,6 @@ class BayOptTuner:
         self.context = state.context
         self.cost_model: CostModel = state.cost_model
         self.max_trials = 10
-        self.decision_lookup = dict()
         self.instruction_decsion_map = dict()
 
     def tune(self):
@@ -285,15 +287,16 @@ class BayOptTuner:
                 n_splits: int = int(inst.attrs[0])
                 total_loop_iters: int = int(functools.reduce(operator.mul, decisions))
 
-                possible_decisions = get_possible_tiling_decisions(total_loop_iters, n_splits)
-                possible_decisions.sort()  # Sort in ascending order, to give the list structure
-                # print(n_splits, total_loop_iters, possible_decisions)
-
+                # Only calculate possible decisions for each pattern once
                 decision_key = ("SamplePerfectTile", n_splits, total_loop_iters)
-                self.decision_lookup[decision_key] = possible_decisions
+                if decision_key not in decision_lookup:
+                    possible_decisions = get_possible_tiling_decisions(total_loop_iters, n_splits)
+                    possible_decisions.sort()  # Sort in ascending order, to give the list structure
+                    # print(n_splits, total_loop_iters, possible_decisions)
+                    decision_lookup[decision_key] = possible_decisions
 
                 inst_dec_tag: str = f"{inst.handle}"
-                pbounds[inst_dec_tag] = (0, len(possible_decisions) - 1)
+                pbounds[inst_dec_tag] = (0, len(decision_lookup[decision_key]) - 1)
                 self.instruction_decsion_map[f"{inst.handle}"] = decision_key
 
         return pbounds
@@ -318,7 +321,7 @@ class BayOptTuner:
         for inst, _ in self.sch.trace.decisions.items():
             if inst.kind.name == "SamplePerfectTile":
                 decision_key = self.instruction_decsion_map[f"{inst.handle}"]
-                possible_decisions = self.decision_lookup[decision_key]
+                possible_decisions = decision_lookup[decision_key]
                 predicted_index = int(next_decisions[f"{inst.handle}"])
                 result_decisions[inst] = possible_decisions[predicted_index]
 
