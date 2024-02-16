@@ -199,7 +199,7 @@ class BayOptTuner:
                 random_state=1,
             )
 
-            utility = UtilityFunction(kind="ucb", kappa=2.5, xi=0.0)
+            utility = UtilityFunction(kind="ucb", kappa=5, xi=0.0)
 
             # self.sch.show()
             with Profiler.timeit("BayOptSearch/Tuner/Tune/Iterating"):
@@ -231,6 +231,10 @@ class BayOptTuner:
                     # sch.trace.show()
                     # return
 
+                    if sch is None:
+                        self.state.logger(logging.DEBUG, __name__, current_line_number(),
+                                          "Failed to apply tuning decisions to trace")
+                        continue
                     # predict schedule score
                     target = self.optimize_func(sch)
                     # print(target)
@@ -435,7 +439,7 @@ class State:
                     f"Prepared a population of {len(combined_schedules)} schedules for measurement")
 
         # Pick top-k best schedules using cost func to avoid measuring all schedules
-        tune_schedules = self.epsilon_greedy_mix(measured_schedules, unmeasured_schedules, 0.1, sample_num)
+        tune_schedules = self.epsilon_greedy_mix(measured_schedules, unmeasured_schedules, 0.2, sample_num)
         # top_k_schedules = self.get_top_k_schedules(unmeasured_schedules, sample_num)
 
         num_sch_to_tuner = 64
@@ -455,7 +459,9 @@ class State:
                 id, result = future.result()
                 tune_schedules[id] = result
 
-        run_schedules = self.epsilon_greedy_mix(tune_schedules, unmeasured_schedules, 0.1, sample_num)
+        self.logger(logging.INFO, __name__, current_line_number(), "Bayesian optimization tuner finished")
+
+        run_schedules = self.epsilon_greedy_mix(tune_schedules, unmeasured_schedules, 0.2, sample_num)
         return assemble_candidates(run_schedules)
 
     def sample_initial_population(self, num_traces: int) -> List[Schedule]:
