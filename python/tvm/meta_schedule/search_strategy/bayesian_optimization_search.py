@@ -24,15 +24,30 @@ import operator
 import logging
 import inspect
 from itertools import permutations
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import hashlib
+import os
+import shutil
+
 
 from bayes_opt import BayesianOptimization, UtilityFunction
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from bayes_opt.logger import JSONLogger
+from bayes_opt.event import Events
+from bayes_opt.util import load_logs
 
 
 DECISION_TYPE = Any
 
 
 decision_lookup = dict()
+
+
+def create_hash(input_string: str) -> str:
+    input_bytes = input_string.encode('utf-8')
+    hash_obj = hashlib.sha256(input_bytes)
+    hash_hex: str = hash_obj.hexdigest()
+
+    return hash_hex
 
 
 def current_line_number():
@@ -172,14 +187,18 @@ class PerThreadData:
 class BayOptTuner:
     def __init__(self,
                  sch: Schedule,
-                 state: "State"):
+                 state: "State",
+                 save_optimizer: bool):
         self.sch: Schedule = sch
         self.postprocs = state.search_strategy.postprocs
         self.state: State = state
-        self.context = state.context
+        self.save_optimizer = save_optimizer
+
+        self.context: TuneContext = state.context
         self.cost_model: CostModel = state.cost_model
         self.max_trials = 10
         self.instruction_decsion_map = dict()
+        self.path_optimizer_dir = self._get_optimizer_dir()
 
     def tune(self):
         with Profiler.timeit("BayOptSearch/Tuner/Tune"):
@@ -201,6 +220,7 @@ class BayOptTuner:
                 random_state=1,
             )
 
+            optimizer = self._configure_optimizer_logging(optimizer)
             utility = UtilityFunction(kind="ucb", kappa=5, xi=0.0)
 
             # self.sch.show()
@@ -268,7 +288,54 @@ class BayOptTuner:
                                                                  decision=decision)
                 sch = new_sch
             # sch.show()
+
+            self._post_tuning_log_copy(sch)
             return sch
+
+    def _post_tuning_log_copy(self, sch: Schedule):
+        if self.save_optimizer:
+            # Save optimizer log with new trace id
+            new_trace_id = create_hash(str(sch.trace))
+            file_name: str = f"log_{new_trace_id}.json"
+            file_path: str = os.path.join(self.path_optimizer_dir, file_name)
+
+            if not os.path.exists(file_path):
+                print("made a copy")
+                pre_tuning_trace_id = create_hash(str(self.sch.trace))
+                pre_tuning_file_name: str = f"log_{pre_tuning_trace_id}.json"
+                pre_tuning_file_path: str = os.path.join(self.path_optimizer_dir, pre_tuning_file_name)
+
+                shutil.copy(pre_tuning_file_path, file_path)
+
+    def _configure_optimizer_logging(self, optimizer: BayesianOptimization) -> BayesianOptimization:
+        if not self.save_optimizer:
+            return optimizer
+        else:
+            self._setup_optimizer_dir()
+
+            # give each trace a unique name
+            trace_id: str = create_hash(str(self.sch.trace))
+            file_name: str = f"log_{trace_id}.json"
+            file_path: str = os.path.join(self.path_optimizer_dir, file_name)
+
+            # if file exists load
+            if os.path.exists(file_path):
+                load_logs(optimizer, logs=file_path)
+
+            # turn logging on again, set reset accordingly
+            logger = JSONLogger(path=file_path, reset=False)
+            optimizer.subscribe(Events.OPTIMIZATION_STEP, logger)
+            return optimizer
+
+    def _setup_optimizer_dir(self) -> None:
+        directory = os.path.dirname(self.path_optimizer_dir)
+
+        if directory and not os.path.exists(self.path_optimizer_dir):
+            os.mkdir(self.path_optimizer_dir)
+
+    def _get_optimizer_dir(self) -> str:
+        work_dir: str = self.state.work_dir
+        return os.path.join(work_dir, "optimizer_logs")
 
     @staticmethod
     def find_matching_instruction(sch: Schedule, inst: Instruction):
@@ -277,6 +344,15 @@ class BayOptTuner:
             if str(new_inst.outputs) == str(inst.outputs):
                 # print("matched")
                 return new_inst
+
+    @staticmethod
+    def get_parameter_name(inst: Instruction, decisions: DECISION_TYPE) -> str:
+        outputs: str = str(inst.outputs).replace(" ", "")
+        name: str = inst.kind.name
+        n_splits: int = int(inst.attrs[0])
+        total_loop_iters: int = int(functools.reduce(operator.mul, decisions))
+
+        return f"{outputs}_{name}_{n_splits}_{total_loop_iters}"
 
     def get_parameters(self):
         pbounds = dict()
@@ -295,9 +371,9 @@ class BayOptTuner:
                     # print(n_splits, total_loop_iters, possible_decisions)
                     decision_lookup[decision_key] = possible_decisions
 
-                inst_dec_tag: str = f"{inst.handle}"
+                inst_dec_tag: str = self.get_parameter_name(inst, decisions)
                 pbounds[inst_dec_tag] = (0, len(decision_lookup[decision_key]) - 1)
-                self.instruction_decsion_map[f"{inst.handle}"] = decision_key
+                self.instruction_decsion_map[inst_dec_tag] = decision_key
 
         return pbounds
 
@@ -318,11 +394,15 @@ class BayOptTuner:
     def build_decision_dict(self, next_decisions) -> Dict[Instruction, DECISION_TYPE]:
         result_decisions: Dict[Instruction, DECISION_TYPE] = dict()
 
-        for inst, _ in self.sch.trace.decisions.items():
+        for inst, decisions in self.sch.trace.decisions.items():
             if inst.kind.name == "SamplePerfectTile":
-                decision_key = self.instruction_decsion_map[f"{inst.handle}"]
+
+                inst_dec_tag: str = self.get_parameter_name(inst, decisions)
+
+                decision_key = self.instruction_decsion_map[inst_dec_tag]
                 possible_decisions = decision_lookup[decision_key]
-                predicted_index = int(next_decisions[f"{inst.handle}"])
+
+                predicted_index = int(next_decisions[inst_dec_tag])
                 result_decisions[inst] = possible_decisions[predicted_index]
 
         return result_decisions
@@ -336,17 +416,18 @@ class State:
                  database: Optional["Database"],
                  cost_model: Optional["CostModel"],
                  search_strategy: "BayesianOptimizationSearch",
-                 context
+                 context: "TuneContext"
                  ):
         self.max_trials = max_trials
         self.num_trials_per_iter = num_trials_per_iter
         self.design_space_schedules = design_spaces_schedules
-        self.database = database
-        self.cost_model = cost_model
+        self.database: Database = database
+        self.cost_model: CostModel = cost_model
         self.search_strategy: BayesianOptimizationSearch = search_strategy
-        self.context = context
+        self.context: TuneContext = context
         self.mod = context.mod
         self.logger = get_logging_func(get_logger(__name__))
+        self.work_dir: str = self.get_work_dir()
 
         self.design_spaces = []
         for space in self.design_space_schedules:
@@ -363,6 +444,10 @@ class State:
             self.per_thread_data_[i].rand_state = forkseed(self.search_strategy.rand_state)
 
         self.workload = database.commit_workload(self.mod)
+
+    def get_work_dir(self) -> str:
+        path_tuning_record: str = self.database.path_tuning_record
+        return os.path.dirname(path_tuning_record)
 
     def reset(self):
         self.max_trials = None
@@ -451,7 +536,9 @@ class State:
                     f"Sending {num_sch_to_tuner} schedule(s) to bayesian optimization tuner")
 
         def f_proc_bay_opt_tune(id: int):
-            bay_opt_tuner = BayOptTuner(tune_schedules[id], self)
+            bay_opt_tuner = BayOptTuner(sch=tune_schedules[id],
+                                        state=self,
+                                        save_optimizer=True)
             return id, bay_opt_tuner.tune()
 
         with ThreadPoolExecutor(max_workers=self.context.num_threads) as executor:
@@ -538,7 +625,7 @@ class BayesianOptimizationSearch(PySearchStrategy):
         context : TuneContext
             The tuning context for initialization.
         """
-        self.context = context
+        self.context: TuneContext = context
         self.postprocs = context.space_generator.postprocs
         self.rand_state = forkseed(context.rand_state)
 
