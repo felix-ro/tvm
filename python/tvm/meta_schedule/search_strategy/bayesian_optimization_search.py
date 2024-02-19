@@ -198,12 +198,12 @@ class BayOptTuner:
         self.cost_model: CostModel = state.cost_model
         self.max_trials = 10
         self.instruction_decsion_map = dict()
-        self.path_optimizer_dir = self._get_optimizer_dir()
+        self.path_optimizer_dir = self._get_optimizer_dir_path()
 
     def tune(self):
         with Profiler.timeit("BayOptSearch/Tuner/Tune"):
             pre_tuning_score = self._predict_normalized_score(self.sch)
-            pbounds = self.get_parameters()
+            pbounds = self._get_parameters()
 
             # Check if there are any tunable instructions
             if len(pbounds) == 0:
@@ -266,7 +266,7 @@ class BayOptTuner:
 
     def _get_schedule_with_predicted_decisons(self, next_decisions: dict) -> Schedule:
         # Connect the list of next decisions with the instructions
-        decisions: Dict[Instruction, DECISION_TYPE] = self.build_decision_dict(next_decisions)
+        decisions: Dict[Instruction, DECISION_TYPE] = self._build_decision_dict(next_decisions)
         return self._apply_decisions(decisions)
 
     def _apply_decisions(self, decisions: Dict[Instruction, DECISION_TYPE]) -> Schedule:
@@ -278,12 +278,12 @@ class BayOptTuner:
         for inst, decision in list(decisions.items()):
             # Retracing the graph changes instruction handles
             # We need to find instruction in trace after each iteration
-            matched_inst = self.find_matching_instruction(sch=sch, inst=inst)
+            matched_inst = self._find_matching_instruction(sch=sch, inst=inst)
 
-            sch: Schedule = self.apply_decision_to_trace(mod=mod,
-                                                         trace=sch.trace,
-                                                         inst=matched_inst,
-                                                         decision=decision)
+            sch: Schedule = self._apply_decision_to_trace(mod=mod,
+                                                          trace=sch.trace,
+                                                          inst=matched_inst,
+                                                          decision=decision)
         return sch
 
     def _post_tuning_log_copy(self, sch: Schedule):
@@ -326,12 +326,12 @@ class BayOptTuner:
         if directory and not os.path.exists(self.path_optimizer_dir):
             os.mkdir(self.path_optimizer_dir)
 
-    def _get_optimizer_dir(self) -> str:
+    def _get_optimizer_dir_path(self) -> str:
         work_dir: str = self.state.work_dir
         return os.path.join(work_dir, "optimizer_logs")
 
     @staticmethod
-    def find_matching_instruction(sch: Schedule, inst: Instruction):
+    def _find_matching_instruction(sch: Schedule, inst: Instruction):
         for new_inst, _ in sch.trace.decisions.items():
             # print(f"{inst.outputs}, {new_inst.outputs}, same {str(new_inst.outputs) == str(inst.outputs)}")
             if str(new_inst.outputs) == str(inst.outputs):
@@ -339,7 +339,7 @@ class BayOptTuner:
                 return new_inst
 
     @staticmethod
-    def get_parameter_name(inst: Instruction, decisions: DECISION_TYPE) -> str:
+    def _get_parameter_name(inst: Instruction, decisions: DECISION_TYPE) -> str:
         outputs: str = str(inst.outputs).replace(" ", "")
         name: str = inst.kind.name
         n_splits: int = int(inst.attrs[0])
@@ -347,7 +347,7 @@ class BayOptTuner:
 
         return f"{outputs}_{name}_{n_splits}_{total_loop_iters}"
 
-    def get_parameters(self):
+    def _get_parameters(self):
         pbounds = dict()
         # self.sch.trace.show()
         for inst, decisions in self.sch.trace.decisions.items():
@@ -364,7 +364,7 @@ class BayOptTuner:
                     # print(n_splits, total_loop_iters, possible_decisions)
                     decision_lookup[decision_key] = possible_decisions
 
-                inst_dec_tag: str = self.get_parameter_name(inst, decisions)
+                inst_dec_tag: str = self._get_parameter_name(inst, decisions)
                 pbounds[inst_dec_tag] = (0, len(decision_lookup[decision_key]) - 1)
                 self.instruction_decsion_map[inst_dec_tag] = decision_key
 
@@ -376,20 +376,20 @@ class BayOptTuner:
                                           cost_model=self.cost_model)
         return score[0]
 
-    def apply_decision_to_trace(self, mod: IRModule, trace: Trace,
-                                inst: Instruction, decision: DECISION_TYPE) -> Schedule | None:
+    def _apply_decision_to_trace(self, mod: IRModule, trace: Trace,
+                                 inst: Instruction, decision: DECISION_TYPE) -> Schedule | None:
         trace = trace.with_decision(inst=inst, decision=decision, remove_postproc=True)
 
         pp = ThreadedTraceApply(postprocs=self.postprocs)
         return pp.apply(mod=mod, trace=trace, rand_state=1)
 
-    def build_decision_dict(self, next_decisions) -> Dict[Instruction, DECISION_TYPE]:
+    def _build_decision_dict(self, next_decisions) -> Dict[Instruction, DECISION_TYPE]:
         result_decisions: Dict[Instruction, DECISION_TYPE] = dict()
 
         for inst, decisions in self.sch.trace.decisions.items():
             if inst.kind.name == "SamplePerfectTile":
 
-                inst_dec_tag: str = self.get_parameter_name(inst, decisions)
+                inst_dec_tag: str = self._get_parameter_name(inst, decisions)
 
                 decision_key = self.instruction_decsion_map[inst_dec_tag]
                 possible_decisions = decision_lookup[decision_key]
