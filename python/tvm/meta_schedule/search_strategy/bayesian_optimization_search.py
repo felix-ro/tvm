@@ -223,34 +223,12 @@ class BayOptTuner:
             optimizer = self._configure_optimizer_logging(optimizer)
             utility = UtilityFunction(kind="ucb", kappa=5, xi=0.0)
 
-            # self.sch.show()
             with Profiler.timeit("BayOptSearch/Tuner/Tune/Iterating"):
                 current_trial: int = 0
                 while (current_trial < self.max_trials):
                     # Get the a list of decisions for the entered pbounds
-                    next_decisions = optimizer.suggest(utility)
-
-                    # Connect the list of next decisions with the instructions
-                    decisions: Dict[Instruction, DECISION_TYPE] = self.build_decision_dict(next_decisions)
-
-                    data: PerThreadData = self.state.per_thread_data_[0]  # Fix this
-                    sch: Schedule = self.sch
-                    mod: IRModule = data.mod
-
-                    # sch.trace.show()
-                    # Apply the decisions to the trace
-                    for inst, decision in list(decisions.items()):
-                        # Retracing the graph changes instruction handles
-                        # We need to find instruction in trace after each iteration
-                        matched_inst = self.find_matching_instruction(sch=sch, inst=inst)
-
-                        new_sch: Schedule = self.apply_decision_to_trace(mod=mod,
-                                                                         trace=sch.trace,
-                                                                         inst=matched_inst,
-                                                                         decision=decision)
-                        sch = new_sch
-                    # sch.trace.show()
-                    # return
+                    next_decisions: dict = optimizer.suggest(utility)
+                    sch: Schedule = self._get_schedule_with_predicted_decisons(next_decisions)
 
                     if sch is None:
                         self.state.logger(logging.DEBUG, __name__, current_line_number(),
@@ -277,20 +255,38 @@ class BayOptTuner:
                 return self.sch
 
             # Construct Schedule from best decisions found with BayOpt
-            best_decisions: Dict[Instruction, DECISION_TYPE] = self.build_decision_dict(optimizer.max["params"])
-            data: PerThreadData = self.state.per_thread_data_[0]  # Fix this
-            sch: Schedule = self.sch
-            mod: IRModule = data.mod
-            for inst, decision in list(best_decisions.items()):
-                new_sch: Schedule = self.apply_decision_to_trace(mod=mod,
-                                                                 trace=sch.trace,
-                                                                 inst=inst,
-                                                                 decision=decision)
-                sch = new_sch
-            # sch.show()
+            best_decisions = optimizer.max["params"]
+            tuned_sch: Schedule = self._get_schedule_with_predicted_decisons(best_decisions)
 
-            self._post_tuning_log_copy(sch)
-            return sch
+            if tuned_sch is None:
+                self.state.logger(logging.DEBUG, __name__, current_line_number(),
+                                  "Failed to apply tuning decisions to trace")
+                return self.sch
+
+            self._post_tuning_log_copy(tuned_sch)
+            return tuned_sch
+
+    def _get_schedule_with_predicted_decisons(self, next_decisions: dict) -> Schedule:
+        # Connect the list of next decisions with the instructions
+        decisions: Dict[Instruction, DECISION_TYPE] = self.build_decision_dict(next_decisions)
+        return self._apply_decisions(decisions)
+
+    def _apply_decisions(self, decisions: Dict[Instruction, DECISION_TYPE]) -> Schedule:
+        data: PerThreadData = self.state.per_thread_data_[0]
+        sch: Schedule = self.sch
+        mod: IRModule = data.mod
+
+        # Apply the decisions to the trace
+        for inst, decision in list(decisions.items()):
+            # Retracing the graph changes instruction handles
+            # We need to find instruction in trace after each iteration
+            matched_inst = self.find_matching_instruction(sch=sch, inst=inst)
+
+            sch: Schedule = self.apply_decision_to_trace(mod=mod,
+                                                         trace=sch.trace,
+                                                         inst=matched_inst,
+                                                         decision=decision)
+        return sch
 
     def _post_tuning_log_copy(self, sch: Schedule):
         if self.save_optimizer:
@@ -300,7 +296,6 @@ class BayOptTuner:
             file_path: str = os.path.join(self.path_optimizer_dir, file_name)
 
             if not os.path.exists(file_path):
-                print("made a copy")
                 pre_tuning_trace_id = create_hash(str(self.sch.trace))
                 pre_tuning_file_name: str = f"log_{pre_tuning_trace_id}.json"
                 pre_tuning_file_path: str = os.path.join(self.path_optimizer_dir, pre_tuning_file_name)
