@@ -207,11 +207,15 @@ class BayOptTuner:
         pre_tuning_score = self._predict_normalized_score(self.sch)
         pbounds = self._get_parameters()
 
-        # Check if there are any tunable instructions
+        # Check the number of tuneable instructions
         if len(pbounds) == 0:
             self.state.logger(logging.DEBUG, __name__, current_line_number(),
                               "No tuneable decision was found in trace")
             return self.sch
+        elif len(pbounds) > 20:
+            self.state.logger(logging.WARN, __name__, current_line_number(),
+                              "Current workload contains more than 20 tuneable instructions." +
+                              "Bayesian Optimization may not be effective.")
 
         optimizer = BayesianOptimization(
             f=None,  # We register results with the optimizer ourselves
