@@ -292,8 +292,16 @@ class BayOptTuner:
 
                 if expected_decision != decision:
                     self.state.logger(logging.ERROR, __name__, current_line_number(),
-                                      f"Could not find expected decision in trace. \
-                                        Expected: {expected_decision} Got: {decision}")
+                                      f"Could not find expected decision in trace for {inst}" +
+                                      f"Expected: {expected_decision} Got: {decision}")
+
+            if inst.kind.name == "SampleCategorical":
+                expected_decision = matched_decisions[inst]
+
+                if expected_decision != decision:
+                    self.state.logger(logging.ERROR, __name__, current_line_number(),
+                                      f"Could not find expected decision in trace for {inst}" +
+                                      f"Expected: {expected_decision} Got: {decision}")
 
     def _apply_decisions(self, decisions: Dict[Instruction, DECISION_TYPE]) -> Schedule:
         data: PerThreadData = self.state.per_thread_data_[0]
