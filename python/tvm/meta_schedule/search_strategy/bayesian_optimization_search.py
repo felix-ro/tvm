@@ -570,7 +570,7 @@ class State:
 
         self.logger(logging.INFO, __name__, current_line_number(),
                     f"Prepared a population of {len(measured_schedules) + len(unmeasured_schedules)} " +
-                    "schedules for tuning selection")
+                    "schedules for tuning")
 
         # Pick the random and untuned schedules for running
         random_schedules = self.epsilon_greedy_mix(exploit_list=[],
