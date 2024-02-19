@@ -438,7 +438,7 @@ class State:
         self.context: TuneContext = context
         self.mod = context.mod
         self.logger = get_logging_func(get_logger(__name__))
-        self.work_dir: str = self.get_work_dir()
+        self.work_dir: str = self._get_work_dir()
 
         self.design_spaces = []
         for space in self.design_space_schedules:
@@ -456,7 +456,7 @@ class State:
 
         self.workload = database.commit_workload(self.mod)
 
-    def get_work_dir(self) -> str:
+    def _get_work_dir(self) -> str:
         path_tuning_record: str = self.database.path_tuning_record
         return os.path.dirname(path_tuning_record)
 
@@ -467,7 +467,7 @@ class State:
         self.database = None
         self.cost_model = None
 
-    def pick_best_from_database(self, num: int) -> List[Schedule]:
+    def _pick_best_from_database(self, num: int) -> List[Schedule]:
         with Profiler.timeit("BayOptSearch/GenerateCandidates/PickBestFromDatabase"):
             picked_traces: List[Trace] = []
             # Load top k tuning records for a workload from database
@@ -524,11 +524,11 @@ class State:
 
         # Top measured database schedules
         num_measured_schedules = int(self.search_strategy.population_size * self.search_strategy.init_measured_ratio)
-        measured_schedules: List[Schedule] = self.pick_best_from_database(num_measured_schedules)
+        measured_schedules: List[Schedule] = self._pick_best_from_database(num_measured_schedules)
 
         # Sample a new population of random schedules
         num_unmeasured_schedules = self.search_strategy.population_size - len(measured_schedules)
-        unmeasured_schedules: List[Schedule] = self.sample_initial_population(num_unmeasured_schedules)
+        unmeasured_schedules: List[Schedule] = self._sample_initial_population(num_unmeasured_schedules)
 
         # Check if minimum amount of schedules were sampled
         if (len(unmeasured_schedules) < self.search_strategy.init_min_unmeasured):
@@ -536,7 +536,7 @@ class State:
 
         combined_schedules: List[Schedule] = measured_schedules + unmeasured_schedules
         self.logger(logging.INFO, __name__, current_line_number(),
-                    f"Prepared a population of {len(combined_schedules)} schedules for measurement")
+                    f"Prepared a population of {len(combined_schedules)} schedules for tuning selection")
 
         # Pick top-k best schedules using cost func to avoid measuring all schedules
         tune_schedules = self.epsilon_greedy_mix(measured_schedules, unmeasured_schedules, 0.2, sample_num)
@@ -572,7 +572,7 @@ class State:
         self.logger(logging.INFO, __name__, current_line_number(), "Bayesian optimization tuner finished")
         return tune_schedules
 
-    def sample_initial_population(self, num_traces: int) -> List[Schedule]:
+    def _sample_initial_population(self, num_traces: int) -> List[Schedule]:
         with Profiler.timeit("BayOptSearch/GenerateCandidates/SamplePopulation"):
             postproc = ThreadedTraceApply(self.search_strategy.postprocs)
             output_schedules: List[Schedule] = []
