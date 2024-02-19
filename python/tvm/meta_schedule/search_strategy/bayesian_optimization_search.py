@@ -81,7 +81,7 @@ def assemble_candidates(picks: List[Schedule]) -> List[MeasureCandidate]:
     return measure_inputs
 
 
-def predict_normalized_score(candidates, context, cost_model):
+def predict_normalized_scores(candidates, context, cost_model):
     """Predict the normalized score of a list of candidates."""
     assert len(candidates) != 0, "Candidates given for score prediction can not be empty list!"
     scores = cost_model.predict(context, assemble_candidates(candidates))
@@ -202,9 +202,7 @@ class BayOptTuner:
 
     def tune(self):
         with Profiler.timeit("BayOptSearch/Tuner/Tune"):
-            pre_tuning_score = predict_normalized_score(candidates=[self.sch],
-                                                        context=self.context,
-                                                        cost_model=self.cost_model)[0]
+            pre_tuning_score = self._predict_normalized_score(self.sch)
             pbounds = self.get_parameters()
 
             # Check if there are any tunable instructions
@@ -214,7 +212,7 @@ class BayOptTuner:
                 return self.sch
 
             optimizer = BayesianOptimization(
-                f=None,
+                f=None,  # We register results with the optimizer ourselves
                 pbounds=pbounds,
                 verbose=2,
                 random_state=1,
@@ -236,7 +234,7 @@ class BayOptTuner:
                         continue
 
                     # predict schedule score
-                    target = self.optimize_func(sch)
+                    target = self._predict_normalized_score(sch)
 
                     # register score with optimizer, to improve next prediction
                     optimizer.register(
@@ -372,11 +370,10 @@ class BayOptTuner:
 
         return pbounds
 
-    def optimize_func(self, sch: Schedule) -> float:
-        sch: List[Schedule] = [sch]
-        score = predict_normalized_score(candidates=sch,
-                                         context=self.context,
-                                         cost_model=self.cost_model)
+    def _predict_normalized_score(self, sch: Schedule) -> float:
+        score = predict_normalized_scores(candidates=[sch],
+                                          context=self.context,
+                                          cost_model=self.cost_model)
         return score[0]
 
     def apply_decision_to_trace(self, mod: IRModule, trace: Trace,
@@ -589,7 +586,7 @@ class State:
 
     def get_top_k_schedules(self, schedules: List[Schedule], k: int) -> List[Schedule]:
         with Profiler.timeit("BayOptSearch/GenerateCandidates/GetTopKSchedules"):
-            scores = predict_normalized_score(schedules, self.context, self.cost_model)
+            scores = predict_normalized_scores(schedules, self.context, self.cost_model)
             idx = np.argsort(scores)[-k:]
 
             top_schedules: List[Schedule] = []
