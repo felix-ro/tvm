@@ -487,7 +487,7 @@ class State:
                         f"Picked {len(results)} schedules from database")
             return results
 
-    def epsilon_greedy_mix(self, exploit_list, explore_list, epsilon, num):
+    def epsilon_greedy_mix(self, exploit_list, explore_list, epsilon, num, for_tuning: bool):
         num_explore_schedules = 0
         mixed_list = []
         for _ in range(num):
@@ -500,13 +500,17 @@ class State:
                     num_explore_schedules += 1
 
         # If we don't have measured candidates yet we fill with random
-        if len(mixed_list) < num:
-            for _ in range(num - len(mixed_list)):
-                mixed_list.append(random.choice(explore_list))
-                num_explore_schedules += 1
+        if for_tuning:
+            if len(mixed_list) < num:
+                for _ in range(num - len(mixed_list)):
+                    mixed_list.append(random.choice(explore_list))
+                    num_explore_schedules += 1
 
-        self.logger(logging.INFO, __name__, current_line_number(),
-                    f"Epsilon Greedy mixed {num_explore_schedules} random schedules into tuning/runner set")
+            self.logger(logging.INFO, __name__, current_line_number(),
+                        f"Epsilon Greedy mixed {num_explore_schedules} random schedules into tuning set")
+        else:
+            self.logger(logging.INFO, __name__, current_line_number(),
+                        f"Epsilon Greedy mixed {len(mixed_list)} random schedules into runner set")
         return mixed_list
 
     def generate_measure_candidates(self) -> Optional[List[MeasureCandidate]]:
@@ -534,21 +538,33 @@ class State:
         if (len(unmeasured_schedules) < self.search_strategy.init_min_unmeasured):
             raise ValueError  # Specify a better error here
 
-        combined_schedules: List[Schedule] = measured_schedules + unmeasured_schedules
         self.logger(logging.INFO, __name__, current_line_number(),
-                    f"Prepared a population of {len(combined_schedules)} schedules for tuning selection")
+                    f"Prepared a population of {len(measured_schedules) + len(unmeasured_schedules)} " +
+                    "schedules for tuning selection")
 
-        # Pick top-k best schedules using cost func to avoid measuring all schedules
-        tune_schedules = self.epsilon_greedy_mix(measured_schedules, unmeasured_schedules, 0.2, sample_num)
-        # top_k_schedules = self.get_top_k_schedules(unmeasured_schedules, sample_num)
+        # Pick the random and untuned schedules for running
+        random_schedules = self.epsilon_greedy_mix(exploit_list=[],
+                                                   explore_list=unmeasured_schedules,
+                                                   epsilon=0.2,
+                                                   num=sample_num,
+                                                   for_tuning=False)
 
+        # Pick a mix of measured schedules and unmeasured for tuning.
+        # The number of schedules send to the tuner is decided by how many random
+        # schedules were selected for direct measurement.
+        tune_schedules = self.epsilon_greedy_mix(exploit_list=measured_schedules,
+                                                 explore_list=unmeasured_schedules,
+                                                 epsilon=0.2,
+                                                 num=sample_num - len(random_schedules),
+                                                 for_tuning=True)
         tuned_schedules: List[Schedule] = self._send_to_bayesian_tuner(tune_schedules)
 
-        run_schedules = self.epsilon_greedy_mix(tuned_schedules, unmeasured_schedules, 0.2, sample_num)
+        run_schedules = random_schedules + tuned_schedules
+        assert len(run_schedules) == sample_num
         return assemble_candidates(run_schedules)
 
     def _send_to_bayesian_tuner(self, tune_schedules: List[Schedule]) -> List[Schedule]:
-        num_sch_to_tuner = 64
+        num_sch_to_tuner = len(tune_schedules)
         self.logger(logging.INFO, __name__, current_line_number(),
                     f"Sending {num_sch_to_tuner} schedule(s) to bayesian optimization tuner")
 
