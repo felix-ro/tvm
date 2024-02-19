@@ -246,7 +246,7 @@ class BayOptTuner:
         # Get the best decisions construct schedule again
         post_tuning_score = optimizer.max['target']
         self.state.logger(logging.DEBUG, __name__, current_line_number(),
-                          f"Pre tuning score: {pre_tuning_score} ==> Post tuning score: {post_tuning_score}")
+                          f"Pre tuning score: {pre_tuning_score:.4f} ==> Post tuning score: {post_tuning_score:.4f}")
 
         # If worse than untuned, return original schedule
         if (post_tuning_score < pre_tuning_score):
