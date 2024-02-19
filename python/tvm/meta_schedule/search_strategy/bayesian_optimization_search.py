@@ -192,77 +192,75 @@ class BayOptTuner:
         self.sch: Schedule = sch
         self.postprocs = state.search_strategy.postprocs
         self.state: State = state
-        self.save_optimizer = save_optimizer
+        self.save_optimizer: bool = save_optimizer
 
         self.context: TuneContext = state.context
         self.cost_model: CostModel = state.cost_model
-        self.max_trials = 10
+        self.max_trials: int = 10
         self.instruction_decsion_map = dict()
-        self.path_optimizer_dir = self._get_optimizer_dir_path()
+        self.path_optimizer_dir: str = self._get_optimizer_dir_path()
 
-    def tune(self):
-        with Profiler.timeit("BayOptSearch/Tuner/Tune"):
-            pre_tuning_score = self._predict_normalized_score(self.sch)
-            pbounds = self._get_parameters()
+    def tune(self) -> Schedule:
+        pre_tuning_score = self._predict_normalized_score(self.sch)
+        pbounds = self._get_parameters()
 
-            # Check if there are any tunable instructions
-            if len(pbounds) == 0:
-                self.state.logger(logging.DEBUG, __name__, current_line_number(),
-                                  "No tuneable decision was found in trace")
-                return self.sch
-
-            optimizer = BayesianOptimization(
-                f=None,  # We register results with the optimizer ourselves
-                pbounds=pbounds,
-                verbose=2,
-                random_state=1,
-            )
-
-            optimizer = self._configure_optimizer_logging(optimizer)
-            utility = UtilityFunction(kind="ucb", kappa=5, xi=0.0)
-
-            with Profiler.timeit("BayOptSearch/Tuner/Tune/Iterating"):
-                current_trial: int = 0
-                while (current_trial < self.max_trials):
-                    # Get the a list of decisions for the entered pbounds
-                    next_decisions: dict = optimizer.suggest(utility)
-                    sch: Schedule = self._get_schedule_with_predicted_decisons(next_decisions)
-
-                    if sch is None:
-                        self.state.logger(logging.DEBUG, __name__, current_line_number(),
-                                          "Failed to apply tuning decisions to trace")
-                        continue
-
-                    # predict schedule score
-                    target = self._predict_normalized_score(sch)
-
-                    # register score with optimizer, to improve next prediction
-                    optimizer.register(
-                        params=next_decisions,
-                        target=target,
-                    )
-                    current_trial += 1
-
-            # Get the best decisions construct schedule again
-            post_tuning_score = optimizer.max['target']
+        # Check if there are any tunable instructions
+        if len(pbounds) == 0:
             self.state.logger(logging.DEBUG, __name__, current_line_number(),
-                              f"Pre tuning score: {pre_tuning_score} ==> Post tuning score: {post_tuning_score}")
+                              "No tuneable decision was found in trace")
+            return self.sch
 
-            # If worse than untuned, return original schedule
-            if (post_tuning_score < pre_tuning_score):
-                return self.sch
+        optimizer = BayesianOptimization(
+            f=None,  # We register results with the optimizer ourselves
+            pbounds=pbounds,
+            verbose=2,
+            random_state=1,
+        )
 
-            # Construct Schedule from best decisions found with BayOpt
-            best_decisions = optimizer.max["params"]
-            tuned_sch: Schedule = self._get_schedule_with_predicted_decisons(best_decisions)
+        optimizer = self._configure_optimizer_logging(optimizer)
+        utility = UtilityFunction(kind="ucb", kappa=5, xi=0.0)
 
-            if tuned_sch is None:
+        current_trial: int = 0
+        while (current_trial < self.max_trials):
+            # Get the a list of decisions for the entered pbounds
+            next_decisions: dict = optimizer.suggest(utility)
+            sch: Schedule = self._get_schedule_with_predicted_decisons(next_decisions)
+
+            if sch is None:
                 self.state.logger(logging.DEBUG, __name__, current_line_number(),
                                   "Failed to apply tuning decisions to trace")
-                return self.sch
+                continue
 
-            self._post_tuning_log_copy(tuned_sch)
-            return tuned_sch
+            # predict schedule score
+            target = self._predict_normalized_score(sch)
+
+            # register score with optimizer, to improve next prediction
+            optimizer.register(
+                params=next_decisions,
+                target=target,
+            )
+            current_trial += 1
+
+        # Get the best decisions construct schedule again
+        post_tuning_score = optimizer.max['target']
+        self.state.logger(logging.DEBUG, __name__, current_line_number(),
+                          f"Pre tuning score: {pre_tuning_score} ==> Post tuning score: {post_tuning_score}")
+
+        # If worse than untuned, return original schedule
+        if (post_tuning_score < pre_tuning_score):
+            return self.sch
+
+        # Construct Schedule from best decisions found with BayOpt
+        best_decisions = optimizer.max["params"]
+        tuned_sch: Schedule = self._get_schedule_with_predicted_decisons(best_decisions)
+
+        if tuned_sch is None:
+            self.state.logger(logging.DEBUG, __name__, current_line_number(),
+                              "Failed to apply tuning decisions to trace")
+            return self.sch
+
+        self._post_tuning_log_copy(tuned_sch)
+        return tuned_sch
 
     def _get_schedule_with_predicted_decisons(self, next_decisions: dict) -> Schedule:
         # Connect the list of next decisions with the instructions
@@ -523,6 +521,12 @@ class State:
         tune_schedules = self.epsilon_greedy_mix(measured_schedules, unmeasured_schedules, 0.2, sample_num)
         # top_k_schedules = self.get_top_k_schedules(unmeasured_schedules, sample_num)
 
+        tuned_schedules: List[Schedule] = self._send_to_bayesian_tuner(tune_schedules)
+
+        run_schedules = self.epsilon_greedy_mix(tuned_schedules, unmeasured_schedules, 0.2, sample_num)
+        return assemble_candidates(run_schedules)
+
+    def _send_to_bayesian_tuner(self, tune_schedules: List[Schedule]) -> List[Schedule]:
         num_sch_to_tuner = 64
         self.logger(logging.INFO, __name__, current_line_number(),
                     f"Sending {num_sch_to_tuner} schedule(s) to bayesian optimization tuner")
@@ -533,19 +537,18 @@ class State:
                                         save_optimizer=True)
             return id, bay_opt_tuner.tune()
 
-        with ThreadPoolExecutor(max_workers=self.context.num_threads) as executor:
-            # Submit all tasks to the executor
-            futures = [executor.submit(f_proc_bay_opt_tune, id) for id in range(num_sch_to_tuner)]
+        with Profiler.timeit("BayOptSearch/Tuner/Tune"):
+            with ThreadPoolExecutor(max_workers=self.context.num_threads) as executor:
+                # Submit all tasks to the executor
+                futures = [executor.submit(f_proc_bay_opt_tune, id) for id in range(num_sch_to_tuner)]
 
-            # Process future results as they complete
-            for future in as_completed(futures):
-                id, result = future.result()
-                tune_schedules[id] = result
+                # Process future results as they complete
+                for future in as_completed(futures):
+                    id, result = future.result()
+                    tune_schedules[id] = result
 
         self.logger(logging.INFO, __name__, current_line_number(), "Bayesian optimization tuner finished")
-
-        run_schedules = self.epsilon_greedy_mix(tune_schedules, unmeasured_schedules, 0.2, sample_num)
-        return assemble_candidates(run_schedules)
+        return tune_schedules
 
     def sample_initial_population(self, num_traces: int) -> List[Schedule]:
         with Profiler.timeit("BayOptSearch/GenerateCandidates/SamplePopulation"):
