@@ -1,6 +1,7 @@
 from typing import TYPE_CHECKING, List, Optional, Any, Dict
 from tvm.tir.schedule import Schedule, Trace, Instruction
-from tvm.ir import IRModule
+from tvm.ir import IRModule, make_node
+from tvm.runtime import String
 
 from .search_strategy import PySearchStrategy, MeasureCandidate, SearchStrategy
 from ..utils import derived_object
@@ -256,6 +257,8 @@ class BayOptTuner:
         best_decisions = optimizer.max["params"]
         tuned_sch: Schedule = self._get_schedule_with_predicted_decisons(best_decisions)
 
+        self.state.logger(logging.INFO, __name__, current_line_number(), f"\n{tuned_sch.trace}")
+
         if tuned_sch is None:
             self.state.logger(logging.DEBUG, __name__, current_line_number(),
                               "Failed to apply tuning decisions to trace")
@@ -359,12 +362,17 @@ class BayOptTuner:
 
     @staticmethod
     def _get_parameter_name(inst: Instruction, decisions: DECISION_TYPE) -> str:
-        outputs: str = str(inst.outputs).replace(" ", "")
         name: str = inst.kind.name
-        n_splits: int = int(inst.attrs[0])
-        total_loop_iters: int = int(functools.reduce(operator.mul, decisions))
 
-        return f"{outputs}_{name}_{n_splits}_{total_loop_iters}"
+        if name == "SamplePerfectTile":
+            outputs: str = str(inst.outputs).replace(" ", "")
+            n_splits: int = int(inst.attrs[0])
+            total_loop_iters: int = int(functools.reduce(operator.mul, decisions))
+
+            return f"{outputs}_{name}_{n_splits}_{total_loop_iters}"
+        elif name == "SampleCategorical":
+            outputs: str = str(inst.outputs).replace(" ", "")
+            return f"{outputs}_{name}"
 
     def _get_parameters(self):
         pbounds = dict()
@@ -386,6 +394,11 @@ class BayOptTuner:
                 inst_dec_tag: str = self._get_parameter_name(inst, decisions)
                 pbounds[inst_dec_tag] = (0, len(decision_lookup[decision_key]) - 1)
                 self.instruction_decsion_map[inst_dec_tag] = decision_key
+            elif inst.kind.name == "SampleCategorical":
+                inst_dec_tag: str = self._get_parameter_name(inst, decisions)
+                print(len(inst.attrs[0]) - 1)
+                print(decisions, type(decisions))
+                pbounds[inst_dec_tag] = (0, len(inst.attrs[0]) - 1)
 
         return pbounds
 
@@ -397,7 +410,15 @@ class BayOptTuner:
 
     def _apply_decision_to_trace(self, mod: IRModule, trace: Trace,
                                  inst: Instruction, decision: DECISION_TYPE) -> Schedule | None:
+
+        if inst.kind.name == "SampleCategorical":
+            print(inst)
+            print(decision)
+
         trace = trace.with_decision(inst=inst, decision=decision, remove_postproc=True)
+
+        if inst.kind.name == "SampleCategorical":
+            print("success")
 
         pp = ThreadedTraceApply(postprocs=self.postprocs)
         return pp.apply(mod=mod, trace=trace, rand_state=1)
@@ -415,6 +436,12 @@ class BayOptTuner:
 
                 predicted_index = int(next_decisions[inst_dec_tag])
                 result_decisions[inst] = possible_decisions[predicted_index]
+            elif inst.kind.name == "SampleCategorical":
+                inst_dec_tag: str = self._get_parameter_name(inst, decisions)
+                predicted_decision = int(next_decisions[inst_dec_tag])
+
+                tvm_object_decision = make_node("IntImm", dtype=String("int32"), value=predicted_decision, span=None)
+                result_decisions[inst] = tvm_object_decision
 
         return result_decisions
 
@@ -576,7 +603,8 @@ class State:
             return id, bay_opt_tuner.tune()
 
         with Profiler.timeit("BayOptSearch/Tuner/Tune"):
-            with ThreadPoolExecutor(max_workers=self.context.num_threads) as executor:
+            with ThreadPoolExecutor(max_workers=1) as executor:
+            #with ThreadPoolExecutor(max_workers=self.context.num_threads) as executor:
                 # Submit all tasks to the executor
                 futures = [executor.submit(f_proc_bay_opt_tune, id) for id in range(num_sch_to_tuner)]
 
