@@ -188,11 +188,13 @@ class BayOptTuner:
     def __init__(self,
                  sch: Schedule,
                  state: "State",
-                 save_optimizer: bool):
+                 save_optimizer: bool,
+                 validate_schedules: bool):
         self.sch: Schedule = sch
         self.postprocs = state.search_strategy.postprocs
         self.state: State = state
         self.save_optimizer: bool = save_optimizer
+        self.validate_schedules: bool = validate_schedules
 
         self.context: TuneContext = state.context
         self.cost_model: CostModel = state.cost_model
@@ -263,9 +265,28 @@ class BayOptTuner:
         return tuned_sch
 
     def _get_schedule_with_predicted_decisons(self, next_decisions: dict) -> Schedule:
-        # Connect the list of next decisions with the instructions
         decisions: Dict[Instruction, DECISION_TYPE] = self._build_decision_dict(next_decisions)
-        return self._apply_decisions(decisions)
+        tuned_schedule: Schedule = self._apply_decisions(decisions)
+
+        if self.validate_schedules:
+            self._validate_tuning_decision_application(tuned_schedule, decisions)
+        return tuned_schedule
+
+    def _validate_tuning_decision_application(self, sch: Schedule, decisions: Dict[Instruction, DECISION_TYPE]):
+        matched_decisions: Dict[Instruction, DECISION_TYPE] = dict()
+        for inst, decision in list(decisions.items()):
+            matched_inst = self._find_matching_instruction(sch=sch, inst=inst)
+            matched_decisions[matched_inst] = decision
+
+        for inst, decision in list(sch.trace.decisions.items()):
+            if inst.kind.name == "SamplePerfectTile":
+                expected_decision = list(matched_decisions[inst])
+                decision = [int(x) for x in decision]
+
+                if expected_decision != decision:
+                    self.state.logger(logging.ERROR, __name__, current_line_number(),
+                                      f"Could not find expected decision in trace. \
+                                        Expected: {expected_decision} Got: {decision}")
 
     def _apply_decisions(self, decisions: Dict[Instruction, DECISION_TYPE]) -> Schedule:
         data: PerThreadData = self.state.per_thread_data_[0]
@@ -534,7 +555,8 @@ class State:
         def f_proc_bay_opt_tune(id: int):
             bay_opt_tuner = BayOptTuner(sch=tune_schedules[id],
                                         state=self,
-                                        save_optimizer=True)
+                                        save_optimizer=True,
+                                        validate_schedules=True)
             return id, bay_opt_tuner.tune()
 
         with Profiler.timeit("BayOptSearch/Tuner/Tune"):
