@@ -221,7 +221,7 @@ class BayOptTuner:
             f=None,  # We register results with the optimizer ourselves
             pbounds=pbounds,
             verbose=2,
-            random_state=1,
+            random_state=forkseed(self.state.search_strategy.rand_state),
         )
 
         optimizer = self._configure_optimizer_logging(optimizer)
@@ -292,7 +292,7 @@ class BayOptTuner:
 
                 if expected_decision != decision:
                     self.state.logger(logging.ERROR, __name__, current_line_number(),
-                                      f"Could not find expected decision in trace for {inst}" +
+                                      f"Could not find expected decision in trace for {inst} " +
                                       f"Expected: {expected_decision} Got: {decision}")
 
             if inst.kind.name == "SampleCategorical":
@@ -318,6 +318,9 @@ class BayOptTuner:
                                                           trace=sch.trace,
                                                           inst=matched_inst,
                                                           decision=decision)
+            if sch is None:
+                return self.sch
+
         return sch
 
     def _post_tuning_log_copy(self, sch: Schedule):
@@ -570,7 +573,7 @@ class State:
 
         self.logger(logging.INFO, __name__, current_line_number(),
                     f"Prepared a population of {len(measured_schedules) + len(unmeasured_schedules)} " +
-                    "schedules for tuning")
+                    "schedules for selection")
 
         # Pick the random and untuned schedules for running
         random_schedules = self.epsilon_greedy_mix(exploit_list=[],
