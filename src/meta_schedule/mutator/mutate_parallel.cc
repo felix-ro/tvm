@@ -39,6 +39,10 @@ bool IsAnnotateWithParallel(const Instruction& inst) {
   return ann_key == attr::meta_schedule_parallel;
 }
 
+TVM_REGISTER_GLOBAL("tir.analysis.is_annotate_with_parallel").set_body_typed([](Instruction inst) {
+  return IsAnnotateWithParallel(inst);
+});
+
 /*!
  * \brief Replace the annotation value
  * \param inst The instruction to be replaced

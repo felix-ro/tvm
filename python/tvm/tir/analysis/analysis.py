@@ -23,6 +23,7 @@ from tvm import Object
 from tvm.ir import IRModule
 from tvm.tir.expr import Var
 from tvm.tir.stmt import Block, BufferRegion, PrimExpr
+from tvm.tir.schedule import Instruction
 
 from .. import Buffer, Stmt
 from ..function import PrimFunc
@@ -417,3 +418,18 @@ def get_vtcm_compaction_passes() -> List[tvm.transform.Pass]:
         returns list of passes
     """
     return _ffi_api.get_vtcm_compaction_passes()  # type: ignore # pylint: disable=no-member
+
+
+def is_annotate_with_parallel(inst: Instruction) -> bool:
+    """Check if the instruction is annotation with `meta_schedule_parallel`
+
+    Parameters
+    ----------
+    inst: tvm.tir.schedule.Instruction
+
+    Returns
+    -------
+    annotated: bool
+        Whether the instruction is annotation with `meta_schedule_parallel`
+    """
+    return _ffi_api.is_annotate_with_parallel(inst)
