@@ -1,5 +1,7 @@
 from typing import TYPE_CHECKING, List, Optional, Any, Dict
 from tvm.tir.schedule import Schedule, Trace, Instruction
+from tvm.tir.analysis import is_annotate_with_parallel, get_possible_parallel_annotate_decisions
+from tvm.tir.stmt import Block
 from tvm.ir import IRModule, make_node
 from tvm.runtime import String
 
@@ -189,21 +191,31 @@ class BayOptTuner:
     def __init__(self,
                  sch: Schedule,
                  state: "State",
-                 save_optimizer: bool,
                  validate_schedules: bool):
         self.sch: Schedule = sch
         self.postprocs = state.search_strategy.postprocs
         self.state: State = state
-        self.save_optimizer: bool = save_optimizer
         self.validate_schedules: bool = validate_schedules
 
         self.context: TuneContext = state.context
         self.cost_model: CostModel = state.cost_model
         self.max_trials: int = 10
         self.instruction_decsion_map = dict()
+        self.possible_annotate_decisions: Dict[str, List[int]] = dict()
         self.path_optimizer_dir: str = self._get_optimizer_dir_path()
 
     def tune(self) -> Schedule:
+        sch_phase_one: Schedule = self.tune_tiling_and_unrole()
+        sch_phase_two: Schedule = self.tune_parallel_annotation(sch_phase_one)
+
+        sch_phase_two.trace.show()
+
+        return sch_phase_two
+
+    def tune_parallel_annotation(self, sch: Schedule) -> Schedule:
+        return sch
+
+    def tune_tiling_and_unrole(self) -> Schedule:
         pre_tuning_score = self._predict_normalized_score(self.sch)
         pbounds = self._get_parameters()
 
@@ -222,6 +234,7 @@ class BayOptTuner:
             pbounds=pbounds,
             verbose=2,
             random_state=forkseed(self.state.search_strategy.rand_state),
+            allow_duplicate_points=False
         )
 
         optimizer = self._configure_optimizer_logging(optimizer)
@@ -300,7 +313,17 @@ class BayOptTuner:
 
                 if expected_decision != decision:
                     self.state.logger(logging.ERROR, __name__, current_line_number(),
-                                      f"Could not find expected decision in trace for {inst}" +
+                                      f"Could not find expected decision in trace for {inst} " +
+                                      f"Expected: {expected_decision} Got: {decision}")
+
+        for inst in sch.trace.insts:
+            # Check if parallel annotate and if we tune the instruction
+            if is_annotate_with_parallel(inst) and inst in matched_decisions:
+                expected_decision = matched_decisions[inst]
+                decision = inst.inputs[1]
+                if expected_decision != decision:
+                    self.state.logger(logging.ERROR, __name__, current_line_number(),
+                                      f"Could not find expected decision in trace for {inst} " +
                                       f"Expected: {expected_decision} Got: {decision}")
 
     def _apply_decisions(self, decisions: Dict[Instruction, DECISION_TYPE]) -> Schedule:
@@ -314,17 +337,23 @@ class BayOptTuner:
             # We need to find instruction in trace after each iteration
             matched_inst = self._find_matching_instruction(sch=sch, inst=inst)
 
-            sch: Schedule = self._apply_decision_to_trace(mod=mod,
-                                                          trace=sch.trace,
-                                                          inst=matched_inst,
-                                                          decision=decision)
+            if matched_inst.kind.name != "Annotate":
+                sch: Schedule = self._apply_decision_to_trace(mod=mod,
+                                                              trace=sch.trace,
+                                                              inst=matched_inst,
+                                                              decision=decision)
+            else:
+                sch: Schedule = self._apply_annotation_to_trace(trace=sch.trace,
+                                                                ann_inst=matched_inst,
+                                                                ann_val=decision,
+                                                                mod=mod)
             if sch is None:
                 return self.sch
 
         return sch
 
     def _post_tuning_log_copy(self, sch: Schedule):
-        if self.save_optimizer:
+        if self.state.search_strategy.save_optimizer:
             # Save optimizer log with new trace id
             new_trace_id = create_hash(str(sch.trace))
             file_name: str = f"log_{new_trace_id}.json"
@@ -338,7 +367,7 @@ class BayOptTuner:
                 shutil.copy(pre_tuning_file_path, file_path)
 
     def _configure_optimizer_logging(self, optimizer: BayesianOptimization) -> BayesianOptimization:
-        if not self.save_optimizer:
+        if not self.state.search_strategy.save_optimizer:
             return optimizer
         else:
             self._setup_optimizer_dir()
@@ -367,27 +396,48 @@ class BayOptTuner:
         work_dir: str = self.state.work_dir
         return os.path.join(work_dir, "optimizer_logs")
 
-    @staticmethod
-    def _find_matching_instruction(sch: Schedule, inst: Instruction):
+    def _find_matching_instruction(self, sch: Schedule, inst: Instruction):
         for new_inst, _ in sch.trace.decisions.items():
             # print(f"{inst.outputs}, {new_inst.outputs}, same {str(new_inst.outputs) == str(inst.outputs)}")
             if str(new_inst.outputs) == str(inst.outputs):
                 # print("matched")
                 return new_inst
 
-    @staticmethod
-    def _get_parameter_name(inst: Instruction, decisions: DECISION_TYPE) -> str:
+        # If not found in decisions, it is an annotation
+        block_rv = inst.inputs[0]
+        block: Block = self.sch.get(block_rv)
+        outputs: str = block.name_hint
+        ann_key: str = str(inst.attrs[0])
+
+        for new_inst in sch.trace.insts:
+            if new_inst.kind.name == "Annotate":
+                block_rv = new_inst.inputs[0]
+                block: Block = sch.get(block_rv)
+                new_outputs: str = block.name_hint
+                new_ann_key: str = str(new_inst.attrs[0])
+
+                if (outputs == new_outputs and ann_key == new_ann_key):
+                    return new_inst
+
+    def _get_parameter_name(self, inst: Instruction, decisions: DECISION_TYPE) -> str:
         name: str = inst.kind.name
 
         if name == "SamplePerfectTile":
             outputs: str = str(inst.outputs).replace(" ", "")
             n_splits: int = int(inst.attrs[0])
             total_loop_iters: int = int(functools.reduce(operator.mul, decisions))
-
             return f"{outputs}_{name}_{n_splits}_{total_loop_iters}"
+
         elif name == "SampleCategorical":
             outputs: str = str(inst.outputs).replace(" ", "")
             return f"{outputs}_{name}"
+
+        elif name == "Annotate":
+            block_rv = inst.inputs[0]
+            block: Block = self.sch.get(block_rv)
+            outputs: str = block.name_hint
+            ann_key: str = str(inst.attrs[0])
+            return f"{outputs}_{name}_{ann_key}"
 
     def _get_parameters(self):
         pbounds = dict()
@@ -413,6 +463,20 @@ class BayOptTuner:
                 inst_dec_tag: str = self._get_parameter_name(inst, decisions)
                 pbounds[inst_dec_tag] = (0, len(inst.attrs[0]) - 1)
 
+        for inst in self.sch.trace.insts:
+            if (is_annotate_with_parallel(inst)):
+                possible_decisions: List[int] = list(get_possible_parallel_annotate_decisions(
+                                                     self.sch,
+                                                     self.sch.trace,
+                                                     1,  # self.state.search_strategy.rand_state,
+                                                     inst,
+                                                     256))
+                if len(possible_decisions) != 0:
+                    possible_decisions.append(256)  # do not hardcode this
+                    inst_ann_tag: str = self._get_parameter_name(inst=inst, decisions=None)
+                    pbounds[inst_ann_tag] = (0, len(possible_decisions) - 1)
+                    self.possible_annotate_decisions[inst_ann_tag] = possible_decisions
+
         return pbounds
 
     def _predict_normalized_score(self, sch: Schedule) -> float:
@@ -425,6 +489,13 @@ class BayOptTuner:
                                  inst: Instruction, decision: DECISION_TYPE) -> Schedule | None:
 
         trace = trace.with_decision(inst=inst, decision=decision, remove_postproc=True)
+
+        pp = ThreadedTraceApply(postprocs=self.postprocs)
+        return pp.apply(mod=mod, trace=trace, rand_state=1)
+
+    def _apply_annotation_to_trace(self, trace: Trace, ann_inst: Instruction,
+                                   ann_val: np.int64, mod: IRModule):
+        trace = trace.change_annotation_in_trace(ann_inst, ann_val)
 
         pp = ThreadedTraceApply(postprocs=self.postprocs)
         return pp.apply(mod=mod, trace=trace, rand_state=1)
@@ -448,6 +519,16 @@ class BayOptTuner:
 
                 tvm_object_decision = make_node("IntImm", dtype=String("int32"), value=predicted_decision, span=None)
                 result_decisions[inst] = tvm_object_decision
+
+        for inst in self.sch.trace.insts:
+            if (is_annotate_with_parallel(inst)):
+                inst_ann_tag: str = self._get_parameter_name(inst=inst, decisions=None)
+
+                # Not all parallel decisions are tunable. (Some only allow a single value)
+                if inst_ann_tag in next_decisions:
+                    predicted_index: int = int(next_decisions[inst_ann_tag])
+                    possible_decisions: List[int] = self.possible_annotate_decisions[inst_ann_tag]
+                    result_decisions[inst] = possible_decisions[predicted_index]
 
         return result_decisions
 
@@ -604,20 +685,25 @@ class State:
         def f_proc_bay_opt_tune(id: int):
             bay_opt_tuner = BayOptTuner(sch=tune_schedules[id],
                                         state=self,
-                                        save_optimizer=True,
                                         validate_schedules=True)
             return id, bay_opt_tuner.tune()
 
-        with Profiler.timeit("BayOptSearch/Tuner/Tune"):
-            # with ThreadPoolExecutor(max_workers=1) as executor:
-            with ThreadPoolExecutor(max_workers=self.context.num_threads) as executor:
-                # Submit all tasks to the executor
-                futures = [executor.submit(f_proc_bay_opt_tune, id) for id in range(num_sch_to_tuner)]
+        if self.search_strategy.threaded:
+            # Threaded
+            with Profiler.timeit("BayOptSearch/Tuner/Tune"):
+                with ThreadPoolExecutor(max_workers=self.context.num_threads) as executor:
+                    # Submit all tasks to the executor
+                    futures = [executor.submit(f_proc_bay_opt_tune, id) for id in range(num_sch_to_tuner)]
 
-                # Process future results as they complete
-                for future in as_completed(futures):
-                    id, result = future.result()
-                    tune_schedules[id] = result
+                    # Process future results as they complete
+                    for future in as_completed(futures):
+                        id, result = future.result()
+                        tune_schedules[id] = result
+        else:
+            # Non Threaded
+            for id in range(num_sch_to_tuner):
+                id, result = f_proc_bay_opt_tune(id)
+                tune_schedules[id] = result
 
         self.logger(logging.INFO, __name__, current_line_number(), "Bayesian optimization tuner finished")
         return tune_schedules
@@ -683,6 +769,8 @@ class BayesianOptimizationSearch(PySearchStrategy):
     init_measured_ratio = 0.2
     init_min_unmeasured = 50
     max_fail_count = 50
+    threaded: bool = True
+    save_optimizer: bool = False
 
     def _initialize_with_tune_context(self, context: "TuneContext") -> None:
         """Initialize the search strategy with tuning context.
