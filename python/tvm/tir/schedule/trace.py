@@ -288,3 +288,21 @@ class Trace(Object):
             black_format = bool(env and int(env))
 
         cprint(str(self), style=style, black_format=black_format)
+
+    def change_annotation_in_trace(self, ann_inst: Instruction, ann_val: int) -> "Trace":
+        """Changes the annotation value of a the passed annotated Instruction in a Trace
+
+        Parameters
+        ----------
+        ann_inst: Instruction
+            The annotated instruction
+
+        ann_val: int
+            The new annotation value
+
+        Returns
+        -------
+        updated_trace: Trace
+            The trace with the new annotation value
+        """
+        return _ffi_api.change_annotation_in_trace(self, ann_inst, ann_val)

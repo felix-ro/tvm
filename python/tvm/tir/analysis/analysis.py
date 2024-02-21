@@ -23,11 +23,13 @@ from tvm import Object
 from tvm.ir import IRModule
 from tvm.tir.expr import Var
 from tvm.tir.stmt import Block, BufferRegion, PrimExpr
-from tvm.tir.schedule import Instruction
+from tvm.tir.schedule import Instruction, Schedule, Trace
 
 from .. import Buffer, Stmt
 from ..function import PrimFunc
 from . import _ffi_api
+
+import numpy as np
 
 
 def expr_deep_equal(lhs: PrimExpr, rhs: PrimExpr) -> bool:
@@ -426,10 +428,40 @@ def is_annotate_with_parallel(inst: Instruction) -> bool:
     Parameters
     ----------
     inst: tvm.tir.schedule.Instruction
+        The instruction to check
 
     Returns
     -------
     annotated: bool
         Whether the instruction is annotation with `meta_schedule_parallel`
     """
-    return _ffi_api.is_annotate_with_parallel(inst)
+    return _ffi_api.is_annotate_with_parallel(inst)  # type: ignore # pylint: disable=no-member
+
+
+def get_possible_parallel_annotate_decisions(sch: Schedule, trace: Trace, rand_state: np.int64,
+                                             inst: Instruction, max_parallel_extent: np.int64):
+    """Gets all possible parralel annotate decisions for a given annotate instruction
+
+    Parameters
+    ----------
+    sch: tvm.tir.Schedule
+        The schedule of the trace
+
+    trace: tvm.tir.Trace
+        The trace the parallel annotate instruction is in
+
+    rand_state: np.int64
+        The random state
+
+    inst: tvm.tir.Instruction
+        The annotate instrcution with "meta_schedule.parallel" as annotation key
+
+    max_parallel_extent: np.int64
+        The maximum parallel extent (num_cores * jobs_per_core)
+
+    Returns
+    -------
+    all_possible_ann_vals: List[int]
+        The possible annotation values
+    """
+    return list(_ffi_api.get_possible_parallel_annotate_decisions(sch, trace, rand_state, inst, max_parallel_extent))

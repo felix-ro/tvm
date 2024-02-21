@@ -429,6 +429,52 @@ void TranslateAddOutputRVs(const Array<ObjectRef>& old_outputs, const Array<Obje
  */
 int GetNumValidInstructions(const Array<Instruction>& insts, bool remove_postproc);
 
+
+/******** Utilites for parallel annotation tuning ********/
+
+/*!
+ * \brief Check if the instruction is annotation with `meta_schedule_parallel`
+ * \param inst The instruction to be checked
+ * \return Whether the instruction is annotation with `meta_schedule_parallel`
+ */
+bool IsAnnotateWithParallel(const Instruction& inst);
+
+/*!
+ * \brief Replace the annotation value
+ * \param inst The instruction to be replaced
+ * \param ann_val The new annotation value
+ * \return The replaced instruction
+ */
+Instruction ReplaceAnnValue(Instruction inst, int64_t ann_val);
+
+/*!
+ * \brief Get the output of the instruction Get-Block
+ * \param inst The instruction to be checked
+ * \return The output of the instruction Get-Block
+ */
+const BlockRVNode* GetInstGetBlockOutput(const Instruction& inst);
+
+/*!
+ * \brief Analyze the parallel structure
+ * \param self The schedule state
+ * \param block_name The name of the root block
+ * \param func_name The name of the PrimFunc
+ * \param limit The uplimit of the parallelism
+ * \return The parallel structure
+ */
+std::vector<std::vector<int64_t>> AnalyzeParallel(const ScheduleState& self,
+                                                  const String& block_name, const String& func_name,
+                                                  int64_t limit);
+
+/*!
+ * \brief Get the number of parallelizable loops for each subtree
+ * \param loop_extent_prods The parallel structure for each subtree
+ * \param limit The uplimit of the parallelism
+ * \return The number of parallelizable loops for each subtree
+ */
+std::vector<int> GetNumFusedLoops(const std::vector<std::vector<int64_t>>& loop_extent_prods,
+                                  int64_t limit);
+
 }  // namespace tir
 }  // namespace tvm
 
