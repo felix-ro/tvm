@@ -1,4 +1,4 @@
-from typing import TYPE_CHECKING, List, Optional, Any, Dict
+from typing import TYPE_CHECKING, List, Optional, Any, Dict, Union
 from tvm.tir.schedule import Schedule, Trace, Instruction
 from tvm.tir.analysis import is_annotate_with_parallel, get_possible_parallel_annotate_decisions
 from tvm.tir.stmt import Block
@@ -6,7 +6,7 @@ from tvm.ir import IRModule, make_node
 from tvm.runtime import String
 
 from .search_strategy import PySearchStrategy, MeasureCandidate, SearchStrategy
-from ..utils import derived_object
+from ..utils import derived_object, cpu_count
 from ..arg_info import ArgInfo
 from ..runner import RunnerResult
 from ..logging import get_logger, get_logging_func
@@ -16,8 +16,6 @@ if TYPE_CHECKING:
     from ..cost_model import CostModel
     from ..database import Database, TuningRecord
     from ..tune_context import TuneContext
-
-    ATTR_TYPE = Any
 
 import numpy as np
 import copy
@@ -32,7 +30,6 @@ import hashlib
 import os
 import shutil
 
-
 from bayes_opt import BayesianOptimization, UtilityFunction
 from bayes_opt.logger import JSONLogger
 from bayes_opt.event import Events
@@ -40,6 +37,7 @@ from bayes_opt.util import load_logs
 
 
 DECISION_TYPE = Any
+ATTR_TYPE = Any
 
 
 decision_lookup = dict()
@@ -84,14 +82,11 @@ def assemble_candidates(picks: List[Schedule]) -> List[MeasureCandidate]:
     return measure_inputs
 
 
-def predict_normalized_scores(candidates, context, cost_model):
+def predict_normalized_scores(candidates: List[Schedule], context: "TuneContext", cost_model: "CostModel"):
     """Predict the normalized score of a list of candidates."""
     assert len(candidates) != 0, "Candidates given for score prediction can not be empty list!"
     scores = cost_model.predict(context, assemble_candidates(candidates))
 
-    # print(f"TLP predict = {scores}")
-    scores = np.clip(scores, 0.0, np.inf)
-    # print(f"TLP predict normal score = {scores}")
     return scores
 
 
@@ -164,7 +159,7 @@ class ThreadedTraceApply:
 
     def apply(self, mod: IRModule, trace: Trace, rand_state: np.int64) -> (Schedule | None):
         sch = Schedule(mod=mod,
-                       seed=forkseed(rand_state),
+                       seed=rand_state,
                        debug_mask=0,
                        error_render_level="none",)
         trace.apply_to_schedule(sch=sch, remove_postproc=True)
@@ -206,14 +201,19 @@ class BayOptTuner:
         self.path_optimizer_dir: str = self._get_optimizer_dir_path()
 
     def tune(self) -> Schedule:
-        sch_phase_one: Schedule = self.tune_tiling_and_unrole()
-        sch_phase_two: Schedule = self.tune_parallel_annotation(sch_phase_one)
+        sch_phase_one, scores = self.tune_tiling_and_unrole()
+        sch_phase_two, scores = self.tune_parallel_annotation(sch_phase_one, scores)
 
-        # sch_phase_two.trace.show()
+        if scores is not None and len(scores) == 3:
+            self.state.logger(logging.DEBUG, __name__, current_line_number(),
+                              f"Score: {scores[0]:.4f} ==> {scores[1]:.4f} ==> {scores[2]:.4f}")
+        elif scores is not None:
+            self.state.logger(logging.DEBUG, __name__, current_line_number(),
+                              f"Score: {scores[0]:.4f} ==> {scores[1]:.4f}")
 
         return sch_phase_two
 
-    def tune_parallel_annotation(self, sch: Schedule) -> Schedule:
+    def tune_parallel_annotation(self, sch: Schedule, scores: List[int]) -> Union[Schedule, List[int]]:
         possible_decision_dict: Dict[Instruction, List[int]] = dict()
 
         # Find all parallel annotations and possible decisions
@@ -221,18 +221,17 @@ class BayOptTuner:
             if (is_annotate_with_parallel(inst)):
                 # sch_copy =copy.deepcopy(sch)
                 possible_decisions = list(get_possible_parallel_annotate_decisions(
-                                                     sch,
-                                                     sch.trace,
-                                                     1,  # self.state.search_strategy.rand_state,
-                                                     inst,
-                                                     256))
+                                                     sch=sch,
+                                                     trace=sch.trace,
+                                                     rand_state=forkseed(self.state.search_strategy.rand_state),
+                                                     inst=inst,
+                                                     max_parallel_extent=16*cpu_count(logical=True)))
                 if len(possible_decisions) != 0:
-                    possible_decisions.append(256)  # do not hardcode this
                     possible_decision_dict[inst] = possible_decisions
 
         # Return if no annotation
         if not bool(possible_decision_dict):
-            return sch
+            return sch, scores
 
         # Prepare all combinations
         schedules: List[Schedule] = []
@@ -246,9 +245,15 @@ class BayOptTuner:
                     schedules.append(new_sch)
 
         # Return the best combination
-        return self.state.get_top_k_schedules(schedules, 1)[0]
+        bests, top_scores = self.state.get_top_k_schedules(schedules, 1)
 
-    def tune_tiling_and_unrole(self) -> Schedule:
+        if top_scores[0] <= scores[1]:
+            return sch, scores
+        else:
+            scores.append(top_scores[0])
+            return bests[0], scores
+
+    def tune_tiling_and_unrole(self) -> Union[Schedule, List[int]]:
         pre_tuning_score = self._predict_normalized_score(self.sch)
         pbounds = self._get_parameters()
 
@@ -256,7 +261,7 @@ class BayOptTuner:
         if len(pbounds) == 0:
             self.state.logger(logging.DEBUG, __name__, current_line_number(),
                               "No tuneable decision was found in trace")
-            return self.sch
+            return self.sch, None
         elif len(pbounds) > 20:
             self.state.logger(logging.WARN, __name__, current_line_number(),
                               "Current workload contains more than 20 tuneable instructions." +
@@ -282,6 +287,7 @@ class BayOptTuner:
             if sch is None:
                 self.state.logger(logging.DEBUG, __name__, current_line_number(),
                                   "Failed to apply tuning decisions to trace")
+                current_trial += 1
                 continue
 
             # predict schedule score
@@ -296,12 +302,11 @@ class BayOptTuner:
 
         # Get the best decisions construct schedule again
         post_tuning_score = optimizer.max['target']
-        self.state.logger(logging.DEBUG, __name__, current_line_number(),
-                          f"Pre tuning score: {pre_tuning_score:.4f} ==> Post tuning score: {post_tuning_score:.4f}")
+        scores: List[int] = [pre_tuning_score, post_tuning_score]
 
         # If worse than untuned, return original schedule
         if (post_tuning_score < pre_tuning_score):
-            return self.sch
+            return self.sch, scores
 
         # Construct Schedule from best decisions found with BayOpt
         best_decisions = optimizer.max["params"]
@@ -312,10 +317,10 @@ class BayOptTuner:
         if tuned_sch is None:
             self.state.logger(logging.DEBUG, __name__, current_line_number(),
                               "Failed to apply tuning decisions to trace")
-            return self.sch
+            return self.sch, scores
 
         self._post_tuning_log_copy(tuned_sch)
-        return tuned_sch
+        return tuned_sch, scores
 
     def _get_schedule_with_predicted_decisons(self, next_decisions: dict) -> Schedule | None:
         decisions: Dict[Instruction, DECISION_TYPE] = self._build_decision_dict(next_decisions)
@@ -368,7 +373,7 @@ class BayOptTuner:
             trace = trace.with_decision(inst=inst, decision=decision, remove_postproc=True)
 
         pp = ThreadedTraceApply(postprocs=self.postprocs)
-        return pp.apply(mod=self.state.mod, trace=trace, rand_state=1)
+        return pp.apply(mod=self.state.mod, trace=trace, rand_state=forkseed(self.state.search_strategy.rand_state))
 
     def _post_tuning_log_copy(self, sch: Schedule):
         if self.state.search_strategy.save_optimizer:
@@ -759,12 +764,14 @@ class State:
     def get_top_k_schedules(self, schedules: List[Schedule], k: int) -> List[Schedule]:
         with Profiler.timeit("BayOptSearch/GenerateCandidates/GetTopKSchedules"):
             scores = predict_normalized_scores(schedules, self.context, self.cost_model)
-            idx = np.argsort(scores)[-k:]
+            idx = np.argsort(scores)[-k:][::-1]
 
             top_schedules: List[Schedule] = []
+            top_scores: List[int] = []
             for index in idx:
                 top_schedules.append(schedules[index])
-            return top_schedules
+                top_scores.append(scores[index])
+            return top_schedules, top_scores
 
     def notify_runner_results(self, measure_candidates: List[MeasureCandidate], results: List[RunnerResult]):
         self.st += len(results)
