@@ -196,6 +196,7 @@ class BayOptTuner:
         self.postprocs = state.search_strategy.postprocs
         self.state: State = state
         self.validate_schedules: bool = validate_schedules
+        self.parallel_extend_tuning: bool = not state.search_strategy.save_optimizer
 
         self.context: TuneContext = state.context
         self.cost_model: CostModel = state.cost_model
@@ -208,12 +209,44 @@ class BayOptTuner:
         sch_phase_one: Schedule = self.tune_tiling_and_unrole()
         sch_phase_two: Schedule = self.tune_parallel_annotation(sch_phase_one)
 
-        sch_phase_two.trace.show()
+        # sch_phase_two.trace.show()
 
         return sch_phase_two
 
     def tune_parallel_annotation(self, sch: Schedule) -> Schedule:
-        return sch
+        possible_decision_dict: Dict[Instruction, List[int]] = dict()
+
+        # Find all parallel annotations and possible decisions
+        for inst in sch.trace.insts:
+            if (is_annotate_with_parallel(inst)):
+                # sch_copy =copy.deepcopy(sch)
+                possible_decisions = list(get_possible_parallel_annotate_decisions(
+                                                     sch,
+                                                     sch.trace,
+                                                     1,  # self.state.search_strategy.rand_state,
+                                                     inst,
+                                                     256))
+                if len(possible_decisions) != 0:
+                    possible_decisions.append(256)  # do not hardcode this
+                    possible_decision_dict[inst] = possible_decisions
+
+        # Return if no annotation
+        if not bool(possible_decision_dict):
+            return sch
+
+        # Prepare all combinations
+        schedules: List[Schedule] = []
+        for inst, possible_decisions in list(possible_decision_dict.items()):
+            for decision in possible_decisions:
+                new_sch: Schedule = self._apply_annotation_to_trace(trace=sch.trace,
+                                                                    ann_inst=inst,
+                                                                    ann_val=decision,
+                                                                    mod=self.state.mod)
+                if new_sch is not None:
+                    schedules.append(new_sch)
+
+        # Return the best combination
+        return self.state.get_top_k_schedules(schedules, 1)[0]
 
     def tune_tiling_and_unrole(self) -> Schedule:
         pre_tuning_score = self._predict_normalized_score(self.sch)
@@ -315,16 +348,16 @@ class BayOptTuner:
                     self.state.logger(logging.ERROR, __name__, current_line_number(),
                                       f"Could not find expected decision in trace for {inst} " +
                                       f"Expected: {expected_decision} Got: {decision}")
-
-        for inst in sch.trace.insts:
-            # Check if parallel annotate and if we tune the instruction
-            if is_annotate_with_parallel(inst) and inst in matched_decisions:
-                expected_decision = matched_decisions[inst]
-                decision = inst.inputs[1]
-                if expected_decision != decision:
-                    self.state.logger(logging.ERROR, __name__, current_line_number(),
-                                      f"Could not find expected decision in trace for {inst} " +
-                                      f"Expected: {expected_decision} Got: {decision}")
+        if self.parallel_extend_tuning:
+            for inst in sch.trace.insts:
+                # Check if parallel annotate and if we tune the instruction
+                if is_annotate_with_parallel(inst) and inst in matched_decisions:
+                    expected_decision = matched_decisions[inst]
+                    decision = inst.inputs[1]
+                    if expected_decision != decision:
+                        self.state.logger(logging.ERROR, __name__, current_line_number(),
+                                          f"Could not find expected decision in trace for {inst} " +
+                                          f"Expected: {expected_decision} Got: {decision}")
 
     def _apply_decisions(self, decisions: Dict[Instruction, DECISION_TYPE]) -> Schedule:
         data: PerThreadData = self.state.per_thread_data_[0]
@@ -342,7 +375,7 @@ class BayOptTuner:
                                                               trace=sch.trace,
                                                               inst=matched_inst,
                                                               decision=decision)
-            else:
+            elif self.parallel_extend_tuning:
                 sch: Schedule = self._apply_annotation_to_trace(trace=sch.trace,
                                                                 ann_inst=matched_inst,
                                                                 ann_val=decision,
@@ -403,21 +436,22 @@ class BayOptTuner:
                 # print("matched")
                 return new_inst
 
-        # If not found in decisions, it is an annotation
-        block_rv = inst.inputs[0]
-        block: Block = self.sch.get(block_rv)
-        outputs: str = block.name_hint
-        ann_key: str = str(inst.attrs[0])
+        if self.parallel_extend_tuning:
+            # If not found in decisions, it is an annotation
+            block_rv = inst.inputs[0]
+            block: Block = self.sch.get(block_rv)
+            outputs: str = block.name_hint
+            ann_key: str = str(inst.attrs[0])
 
-        for new_inst in sch.trace.insts:
-            if new_inst.kind.name == "Annotate":
-                block_rv = new_inst.inputs[0]
-                block: Block = sch.get(block_rv)
-                new_outputs: str = block.name_hint
-                new_ann_key: str = str(new_inst.attrs[0])
+            for new_inst in sch.trace.insts:
+                if new_inst.kind.name == "Annotate":
+                    block_rv = new_inst.inputs[0]
+                    block: Block = sch.get(block_rv)
+                    new_outputs: str = block.name_hint
+                    new_ann_key: str = str(new_inst.attrs[0])
 
-                if (outputs == new_outputs and ann_key == new_ann_key):
-                    return new_inst
+                    if (outputs == new_outputs and ann_key == new_ann_key):
+                        return new_inst
 
     def _get_parameter_name(self, inst: Instruction, decisions: DECISION_TYPE) -> str:
         name: str = inst.kind.name
@@ -427,12 +461,10 @@ class BayOptTuner:
             n_splits: int = int(inst.attrs[0])
             total_loop_iters: int = int(functools.reduce(operator.mul, decisions))
             return f"{outputs}_{name}_{n_splits}_{total_loop_iters}"
-
         elif name == "SampleCategorical":
             outputs: str = str(inst.outputs).replace(" ", "")
             return f"{outputs}_{name}"
-
-        elif name == "Annotate":
+        elif self.parallel_extend_tuning and name == "Annotate":
             block_rv = inst.inputs[0]
             block: Block = self.sch.get(block_rv)
             outputs: str = block.name_hint
@@ -463,19 +495,20 @@ class BayOptTuner:
                 inst_dec_tag: str = self._get_parameter_name(inst, decisions)
                 pbounds[inst_dec_tag] = (0, len(inst.attrs[0]) - 1)
 
-        for inst in self.sch.trace.insts:
-            if (is_annotate_with_parallel(inst)):
-                possible_decisions: List[int] = list(get_possible_parallel_annotate_decisions(
-                                                     self.sch,
-                                                     self.sch.trace,
-                                                     1,  # self.state.search_strategy.rand_state,
-                                                     inst,
-                                                     256))
-                if len(possible_decisions) != 0:
-                    possible_decisions.append(256)  # do not hardcode this
-                    inst_ann_tag: str = self._get_parameter_name(inst=inst, decisions=None)
-                    pbounds[inst_ann_tag] = (0, len(possible_decisions) - 1)
-                    self.possible_annotate_decisions[inst_ann_tag] = possible_decisions
+        if self.parallel_extend_tuning:
+            for inst in self.sch.trace.insts:
+                if (is_annotate_with_parallel(inst)):
+                    possible_decisions: List[int] = list(get_possible_parallel_annotate_decisions(
+                                                         self.sch,
+                                                         self.sch.trace,
+                                                         1,  # self.state.search_strategy.rand_state,
+                                                         inst,
+                                                         256))
+                    if len(possible_decisions) != 0:
+                        possible_decisions.append(256)  # do not hardcode this
+                        inst_ann_tag: str = self._get_parameter_name(inst=inst, decisions=None)
+                        pbounds[inst_ann_tag] = (0, len(possible_decisions) - 1)
+                        self.possible_annotate_decisions[inst_ann_tag] = possible_decisions
 
         return pbounds
 
@@ -520,15 +553,16 @@ class BayOptTuner:
                 tvm_object_decision = make_node("IntImm", dtype=String("int32"), value=predicted_decision, span=None)
                 result_decisions[inst] = tvm_object_decision
 
-        for inst in self.sch.trace.insts:
-            if (is_annotate_with_parallel(inst)):
-                inst_ann_tag: str = self._get_parameter_name(inst=inst, decisions=None)
+        if self.parallel_extend_tuning:
+            for inst in self.sch.trace.insts:
+                if (is_annotate_with_parallel(inst)):
+                    inst_ann_tag: str = self._get_parameter_name(inst=inst, decisions=None)
 
-                # Not all parallel decisions are tunable. (Some only allow a single value)
-                if inst_ann_tag in next_decisions:
-                    predicted_index: int = int(next_decisions[inst_ann_tag])
-                    possible_decisions: List[int] = self.possible_annotate_decisions[inst_ann_tag]
-                    result_decisions[inst] = possible_decisions[predicted_index]
+                    # Not all parallel decisions are tunable. (Some only allow a single value)
+                    if inst_ann_tag in next_decisions:
+                        predicted_index: int = int(next_decisions[inst_ann_tag])
+                        possible_decisions: List[int] = self.possible_annotate_decisions[inst_ann_tag]
+                        result_decisions[inst] = possible_decisions[predicted_index]
 
         return result_decisions
 
@@ -770,7 +804,7 @@ class BayesianOptimizationSearch(PySearchStrategy):
     init_min_unmeasured = 50
     max_fail_count = 50
     threaded: bool = True
-    save_optimizer: bool = False
+    save_optimizer: bool = True
 
     def _initialize_with_tune_context(self, context: "TuneContext") -> None:
         """Initialize the search strategy with tuning context.
