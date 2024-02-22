@@ -317,11 +317,11 @@ class BayOptTuner:
         self._post_tuning_log_copy(tuned_sch)
         return tuned_sch
 
-    def _get_schedule_with_predicted_decisons(self, next_decisions: dict) -> Schedule:
+    def _get_schedule_with_predicted_decisons(self, next_decisions: dict) -> Schedule | None:
         decisions: Dict[Instruction, DECISION_TYPE] = self._build_decision_dict(next_decisions)
-        tuned_schedule: Schedule = self._apply_decisions(decisions)
+        tuned_schedule: Schedule | None = self._apply_decisions(decisions)
 
-        if self.validate_schedules:
+        if self.validate_schedules and tuned_schedule is not None:
             self._validate_tuning_decision_application(tuned_schedule, decisions)
         return tuned_schedule
 
@@ -359,31 +359,16 @@ class BayOptTuner:
                                           f"Could not find expected decision in trace for {inst} " +
                                           f"Expected: {expected_decision} Got: {decision}")
 
-    def _apply_decisions(self, decisions: Dict[Instruction, DECISION_TYPE]) -> Schedule:
-        data: PerThreadData = self.state.per_thread_data_[0]
-        sch: Schedule = self.sch
-        mod: IRModule = data.mod
+    def _apply_decisions(self, decisions: Dict[Instruction, DECISION_TYPE]) -> Schedule | None:
+        # Get the schedules trace
+        trace: Trace = self.sch.trace
 
         # Apply the decisions to the trace
         for inst, decision in list(decisions.items()):
-            # Retracing the graph changes instruction handles
-            # We need to find instruction in trace after each iteration
-            matched_inst = self._find_matching_instruction(sch=sch, inst=inst)
+            trace = trace.with_decision(inst=inst, decision=decision, remove_postproc=True)
 
-            if matched_inst.kind.name != "Annotate":
-                sch: Schedule = self._apply_decision_to_trace(mod=mod,
-                                                              trace=sch.trace,
-                                                              inst=matched_inst,
-                                                              decision=decision)
-            elif self.parallel_extend_tuning:
-                sch: Schedule = self._apply_annotation_to_trace(trace=sch.trace,
-                                                                ann_inst=matched_inst,
-                                                                ann_val=decision,
-                                                                mod=mod)
-            if sch is None:
-                return self.sch
-
-        return sch
+        pp = ThreadedTraceApply(postprocs=self.postprocs)
+        return pp.apply(mod=self.state.mod, trace=trace, rand_state=1)
 
     def _post_tuning_log_copy(self, sch: Schedule):
         if self.state.search_strategy.save_optimizer:
@@ -517,14 +502,6 @@ class BayOptTuner:
                                           context=self.context,
                                           cost_model=self.cost_model)
         return score[0]
-
-    def _apply_decision_to_trace(self, mod: IRModule, trace: Trace,
-                                 inst: Instruction, decision: DECISION_TYPE) -> Schedule | None:
-
-        trace = trace.with_decision(inst=inst, decision=decision, remove_postproc=True)
-
-        pp = ThreadedTraceApply(postprocs=self.postprocs)
-        return pp.apply(mod=mod, trace=trace, rand_state=1)
 
     def _apply_annotation_to_trace(self, trace: Trace, ann_inst: Instruction,
                                    ann_val: np.int64, mod: IRModule):
