@@ -87,7 +87,7 @@ def predict_normalized_scores(candidates: List[Schedule], context: "TuneContext"
     assert len(candidates) != 0, "Candidates given for score prediction can not be empty list!"
     scores = cost_model.predict(context, assemble_candidates(candidates))
 
-    return scores
+    return list(scores)
 
 
 def get_possible_tiling_decisions(tile_product, num_tiles):
@@ -191,7 +191,8 @@ class BayOptTuner:
         self.postprocs = state.search_strategy.postprocs
         self.state: State = state
         self.validate_schedules: bool = validate_schedules
-        self.parallel_extend_tuning: bool = not state.search_strategy.save_optimizer
+        self.parallel_extend_tuning: bool = False
+        self.log_tuning_traces: bool = False
 
         self.context: TuneContext = state.context
         self.cost_model: CostModel = state.cost_model
@@ -272,11 +273,13 @@ class BayOptTuner:
             pbounds=pbounds,
             verbose=2,
             random_state=forkseed(self.state.search_strategy.rand_state),
-            allow_duplicate_points=False
+            allow_duplicate_points=True
         )
 
         optimizer = self._configure_optimizer_logging(optimizer)
         utility = UtilityFunction(kind="ucb", kappa=5, xi=0.0)
+
+        max_decisions = (0, None)
 
         current_trial: int = 0
         while (current_trial < self.max_trials):
@@ -293,26 +296,29 @@ class BayOptTuner:
             # predict schedule score
             target = self._predict_normalized_score(sch)
 
+            if self.log_tuning_traces:
+                self.state.logger(logging.INFO, __name__, current_line_number(),
+                                  f"Target {target} Schedule: \n {sch.trace}\n{sch.mod}")
+
             # register score with optimizer, to improve next prediction
             optimizer.register(
                 params=next_decisions,
                 target=target,
             )
+            # Save run info
+            if target >= max_decisions[0]:
+                max_decisions = (target, next_decisions)
+
             current_trial += 1
 
         # Get the best decisions construct schedule again
-        post_tuning_score = optimizer.max['target']
+        post_tuning_score = max_decisions[0]
         scores: List[int] = [pre_tuning_score, post_tuning_score]
 
-        # If worse than untuned, return original schedule
-        if (post_tuning_score < pre_tuning_score):
-            return self.sch, scores
-
-        # Construct Schedule from best decisions found with BayOpt
-        best_decisions = optimizer.max["params"]
-        tuned_sch: Schedule = self._get_schedule_with_predicted_decisons(best_decisions)
-
-        # self.state.logger(logging.INFO, __name__, current_line_number(), f"\n{tuned_sch.trace}")
+        # Construct Schedule from best decisions found with BayOpt in this tuning run (not overall)
+        tuned_sch: Schedule = self._get_schedule_with_predicted_decisons(max_decisions[1])
+        copy = self._get_schedule_with_predicted_decisons(max_decisions[1])
+        assert str(tuned_sch.trace) == str(copy.trace)
 
         if tuned_sch is None:
             self.state.logger(logging.DEBUG, __name__, current_line_number(),
@@ -320,6 +326,10 @@ class BayOptTuner:
             return self.sch, scores
 
         self._post_tuning_log_copy(tuned_sch)
+
+        if self.log_tuning_traces:
+            self.state.logger(logging.INFO, __name__, current_line_number(),
+                              f"Result {scores[0]} Schedule: \n{tuned_sch.trace}\n{tuned_sch.mod}\n\n\n\n")
         return tuned_sch, scores
 
     def _get_schedule_with_predicted_decisons(self, next_decisions: dict) -> Schedule | None:
@@ -788,7 +798,7 @@ class BayesianOptimizationSearch(PySearchStrategy):
     init_min_unmeasured = 50
     max_fail_count = 50
     threaded: bool = True
-    save_optimizer: bool = True
+    save_optimizer: bool = False
 
     def _initialize_with_tune_context(self, context: "TuneContext") -> None:
         """Initialize the search strategy with tuning context.
