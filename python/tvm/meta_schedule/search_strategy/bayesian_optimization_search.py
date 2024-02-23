@@ -647,13 +647,11 @@ class State:
         measured_schedules: List[Schedule] = []
         if num_workload_db_entries >= 128:
             # Top measured database schedules
-            num_measured_schedules = int(self.search_strategy.population_size *
-                                         self.search_strategy.init_measured_ratio)
+            num_measured_schedules = int(32)
             measured_schedules = self._pick_best_from_database(num_measured_schedules)
 
         # Sample a new population of random schedules
-        num_unmeasured_schedules = self.search_strategy.population_size - len(measured_schedules)
-        unmeasured_schedules: List[Schedule] = self._sample_initial_population(num_unmeasured_schedules)
+        unmeasured_schedules: List[Schedule] = self._sample_initial_population(self.search_strategy.population_size)
 
         # Check if minimum amount of schedules were sampled
         if (len(unmeasured_schedules) < self.search_strategy.init_min_unmeasured):
@@ -670,12 +668,16 @@ class State:
                                                    num=sample_num,
                                                    fill_missing=False)
 
+        # Get the best schedules from population
+        best_unmeasured_schedules, scores_unmeasured = self.get_top_k_schedules(unmeasured_schedules, 32)
+        print(scores_unmeasured)
+
         # Pick a mix of measured schedules and unmeasured for tuning.
         # The number of schedules send to the tuner is decided by how many random
         # schedules were selected for direct measurement.
         tune_schedules = self.epsilon_greedy_mix(exploit_list=measured_schedules,
-                                                 explore_list=unmeasured_schedules,
-                                                 epsilon=0.2,
+                                                 explore_list=best_unmeasured_schedules,
+                                                 epsilon=0.4,
                                                  num=sample_num - len(random_schedules),
                                                  fill_missing=True)
 
@@ -739,7 +741,7 @@ class State:
 
                     design_space_index: int = sample_int(rand_state, 0, len(self.design_spaces))
                     trace: Trace = Trace(self.design_spaces[design_space_index].insts, {})
-                    sch: Schedule = postproc.apply(mod=mod, trace=trace, rand_state=rand_state)
+                    sch: Schedule = postproc.apply(mod=mod, trace=trace, rand_state=forkseed(rand_state))
                     if (sch is not None):
                         results[trace_id] = sch
 
@@ -756,7 +758,7 @@ class State:
                             f"Sampled {len(output_schedules)} new random schedules")
                 return output_schedules
 
-    def get_top_k_schedules(self, schedules: List[Schedule], k: int) -> List[Schedule]:
+    def get_top_k_schedules(self, schedules: List[Schedule], k: int) -> Union[List[Schedule] | List[int]]:
         with Profiler.timeit("BayOptSearch/GenerateCandidates/GetTopKSchedules"):
             scores = predict_normalized_scores(schedules, self.context, self.cost_model)
             idx = np.argsort(scores)[-k:][::-1]
@@ -778,7 +780,7 @@ class BayesianOptimizationSearch(PySearchStrategy):
     context: "TuneContext" = None
     state: State = None
 
-    population_size = 512
+    population_size = 1024
     init_measured_ratio = 0.1
     init_min_unmeasured = 50
     max_fail_count = 50
