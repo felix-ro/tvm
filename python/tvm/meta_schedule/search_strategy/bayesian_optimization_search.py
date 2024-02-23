@@ -186,7 +186,8 @@ class BayOptTuner:
                  schedules: List[Schedule],
                  state: "State",
                  validate_schedules: bool,
-                 max_trials: int):
+                 max_trials: int,
+                 optimizer_logging):
         self.schedules: Schedule = schedules
         self.state: State = state
         self.context: TuneContext = state.context
@@ -194,12 +195,16 @@ class BayOptTuner:
         self.postprocs = state.search_strategy.postprocs
         self.validate_schedules: bool = validate_schedules
         self.max_trials: int = max_trials
+        self.optimizer_logging: bool = optimizer_logging
 
         self.parallel_extend_tuning: bool = False
         self.log_tuning_traces: bool = False
         self.instruction_decsion_map = dict()
         self.possible_annotate_decisions: Dict[str, List[int]] = dict()
         self.path_optimizer_dir: str = self._get_optimizer_dir_path()
+
+        if self.optimizer_logging:
+            self._setup_optimizer_dir()
 
     def tune(self) -> Schedule:
         tune_schedules: List[Schedule] = self.schedules
@@ -286,7 +291,7 @@ class BayOptTuner:
         if len(pbounds) == 0:
             self.state.logger(logging.DEBUG, __name__, current_line_number(),
                               "No tuneable decision was found in trace")
-            return untuned_sch, None
+            return untuned_sch, [pre_tuning_score, 0]
         elif len(pbounds) > 20:
             self.state.logger(logging.WARN, __name__, current_line_number(),
                               "Current workload contains more than 20 tuneable instructions." +
@@ -309,6 +314,12 @@ class BayOptTuner:
         while (current_trial < self.max_trials):
             # Get the a list of decisions for the entered pbounds
             next_decisions: dict = optimizer.suggest(utility)
+
+            if next_decisions is None:
+                self.state.logger(logging.ERROR, __name__, current_line_number(),
+                                  "Optimizer failed to predict next decision")
+                return untuned_sch, [pre_tuning_score, 0]
+
             sch: Schedule = self._get_schedule_with_predicted_decisons(untuned_sch, next_decisions)
 
             if sch is None:
@@ -334,6 +345,9 @@ class BayOptTuner:
                 max_decisions = (target, next_decisions)
 
             current_trial += 1
+
+        if max_decisions[0] is None or max_decisions[1] is None:
+            return untuned_sch, [pre_tuning_score, 0]
 
         # Get the best decisions construct schedule again
         post_tuning_score = max_decisions[0]
@@ -400,7 +414,7 @@ class BayOptTuner:
         return pp.apply(mod=self.state.mod, trace=trace, rand_state=forkseed(self.state.search_strategy.rand_state))
 
     def _post_tuning_log_copy(self, tuned_sch: Schedule, untuned_sch: Schedule):
-        if self.state.search_strategy.save_optimizer:
+        if self.optimizer_logging:
             # Save optimizer log with new trace id
             new_trace_id = create_hash(str(tuned_sch.trace))
             file_name: str = f"log_{new_trace_id}.json"
@@ -415,11 +429,9 @@ class BayOptTuner:
 
     def _configure_optimizer_logging(self, untuned_sch: Schedule,
                                      optimizer: BayesianOptimization) -> BayesianOptimization:
-        if not self.state.search_strategy.save_optimizer:
+        if not self.optimizer_logging:
             return optimizer
         else:
-            self._setup_optimizer_dir()
-
             # give each trace a unique name
             trace_id: str = create_hash(str(untuned_sch.trace))
             file_name: str = f"log_{trace_id}.json"
@@ -592,7 +604,7 @@ class State:
                         f"Picked {len(results)} schedules from database")
             return results
 
-    def epsilon_greedy_mix(self, exploit_list, explore_list, epsilon, num, for_tuning: bool):
+    def epsilon_greedy_mix(self, exploit_list, explore_list, epsilon, num, fill_missing: bool):
         num_explore_schedules = 0
         mixed_list = []
         for _ in range(num):
@@ -605,7 +617,7 @@ class State:
                     num_explore_schedules += 1
 
         # If we don't have measured candidates yet we fill with random
-        if for_tuning:
+        if fill_missing:
             if len(mixed_list) < num:
                 for _ in range(num - len(mixed_list)):
                     mixed_list.append(random.choice(explore_list))
@@ -631,9 +643,13 @@ class State:
 
         assert self.st < self.ed, f"check failed: {self.st} < {self.ed}"
 
-        # Top measured database schedules
-        num_measured_schedules = int(self.search_strategy.population_size * self.search_strategy.init_measured_ratio)
-        measured_schedules: List[Schedule] = self._pick_best_from_database(num_measured_schedules)
+        num_workload_db_entries = self._get_num_workload_entries()
+        measured_schedules: List[Schedule] = []
+        if num_workload_db_entries >= 128:
+            # Top measured database schedules
+            num_measured_schedules = int(self.search_strategy.population_size *
+                                         self.search_strategy.init_measured_ratio)
+            measured_schedules = self._pick_best_from_database(num_measured_schedules)
 
         # Sample a new population of random schedules
         num_unmeasured_schedules = self.search_strategy.population_size - len(measured_schedules)
@@ -652,7 +668,7 @@ class State:
                                                    explore_list=unmeasured_schedules,
                                                    epsilon=0.2,
                                                    num=sample_num,
-                                                   for_tuning=False)
+                                                   fill_missing=False)
 
         # Pick a mix of measured schedules and unmeasured for tuning.
         # The number of schedules send to the tuner is decided by how many random
@@ -661,7 +677,7 @@ class State:
                                                  explore_list=unmeasured_schedules,
                                                  epsilon=0.2,
                                                  num=sample_num - len(random_schedules),
-                                                 for_tuning=True)
+                                                 fill_missing=True)
 
         tuned_schedules: List[Schedule] = self._send_to_bayesian_tuner(tune_schedules)
 
@@ -669,7 +685,25 @@ class State:
         assert len(run_schedules) == sample_num
         return assemble_candidates(run_schedules)
 
+    def _get_num_workload_entries(self):
+        return len(self.database.get_top_k(self.workload, 256))
+
     def _send_to_bayesian_tuner(self, tune_schedules: List[Schedule]) -> List[Schedule]:
+        num_workload_db_entries = self._get_num_workload_entries()
+
+        num_trials = 0
+        optimizer_logging = False
+        if num_workload_db_entries < 124:
+            # XGB Cost Model is not yet accurate
+            num_trials = 1
+            optimizer_logging = False
+        elif 124 <= num_workload_db_entries and num_workload_db_entries < 256:
+            num_trials = 10
+            optimizer_logging = False
+        else:
+            num_trials = 64
+            optimizer_logging = True and self.search_strategy.save_optimizer
+
         num_sch_to_tuner = len(tune_schedules)
         self.logger(logging.INFO, __name__, current_line_number(),
                     f"Sending {num_sch_to_tuner} schedule(s) to bayesian optimization tuner")
@@ -677,7 +711,8 @@ class State:
         bay_opt_tuner = BayOptTuner(schedules=tune_schedules,
                                     state=self,
                                     validate_schedules=True,
-                                    max_trials=10)
+                                    max_trials=num_trials,
+                                    optimizer_logging=optimizer_logging)
 
         tuned_schedules: List[Schedule] = bay_opt_tuner.tune()
 
@@ -748,7 +783,7 @@ class BayesianOptimizationSearch(PySearchStrategy):
     init_min_unmeasured = 50
     max_fail_count = 50
     threaded: bool = True
-    save_optimizer: bool = False
+    save_optimizer: bool = True
 
     def _initialize_with_tune_context(self, context: "TuneContext") -> None:
         """Initialize the search strategy with tuning context.
