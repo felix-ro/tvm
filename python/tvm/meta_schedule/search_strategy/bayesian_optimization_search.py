@@ -24,10 +24,11 @@ import operator
 import logging
 import inspect
 from itertools import permutations
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, ProcessPoolExecutor
 import hashlib
 import os
 import shutil
+import time
 
 from bayes_opt import BayesianOptimization, UtilityFunction
 from bayes_opt.logger import JSONLogger
@@ -40,6 +41,8 @@ ATTR_TYPE = Any
 
 
 decision_lookup = dict()
+
+logger = get_logging_func(get_logger(__name__))
 
 
 def create_hash(input_string: str) -> str:
@@ -181,21 +184,88 @@ class PerThreadData:
         self.rand_state = np.int64(-1)
 
 
+def callparallel(tune_schedules: List[Schedule], num_trials, optimizer_logging, postprocs, threaded, state: "State"):
+    num_sch_to_tuner = len(tune_schedules)
+
+    with Profiler.timeit("BayOptSearch/Tuner/Tune"):
+        if threaded:
+            with ProcessPoolExecutor(max_workers=16) as executor:
+                futures = [executor.submit(helper, copy.deepcopy(state.mod), tune_schedules[id].trace, num_trials,
+                                           optimizer_logging, postprocs, state.context, state.cost_model,
+                                           state.work_dir, state.rand_state, id)
+                           for id in range(num_sch_to_tuner)]
+
+                for future in futures:
+                    try:
+                        tuned_schedule, id = future.result()
+                        tune_schedules[id] = tuned_schedule
+                    except Exception as e:
+                        print(f'Task generated an exception: {e}')
+
+        else:
+            for id in range(num_sch_to_tuner):
+                tuned_schedule, id = helper(copy.deepcopy(state.mod), tune_schedules[id].trace, num_trials,
+                                            optimizer_logging, postprocs, state.context, state.cost_model,
+                                            state.work_dir, state.rand_state, id)
+                tune_schedules[id] = tuned_schedule
+
+    return tune_schedules
+
+
+def helper(mod, trace, num_trials, optimizer_logging, postprocs, context, cost_model, work_dir, rand_state, id):
+    pp = ThreadedTraceApply(postprocs=postprocs)
+    untuned_sch = pp.apply(mod=mod, trace=trace, rand_state=forkseed(1))
+
+    bay_opt_tuner = BayOptTuner(schedule=untuned_sch,
+                                validate_schedules=True,
+                                max_trials=num_trials,
+                                optimizer_logging=optimizer_logging,
+                                postprocs=postprocs,
+                                context=context,
+                                cost_model=cost_model,
+                                work_dir=work_dir,
+                                mod=mod,
+                                rand_state=rand_state)
+
+    return bay_opt_tuner.tune(), id
+
+
+# def helper2(untuned_sch, num_trials, optimizer_logging, postprocs, context, cost_model, id):
+#     bay_opt_tuner = BayOptTuner(schedule=untuned_sch,
+#                                 state=None,
+#                                 validate_schedules=True,
+#                                 max_trials=num_trials,
+#                                 optimizer_logging=optimizer_logging,
+#                                 postprocs=postprocs,
+#                                 context=context,
+#                                 cost_model=cost_model)
+
+#     return bay_opt_tuner.tune(), id
+
+
 class BayOptTuner:
     def __init__(self,
-                 schedules: List[Schedule],
-                 state: "State",
+                 schedule: Schedule,
                  validate_schedules: bool,
                  max_trials: int,
-                 optimizer_logging):
-        self.schedules: Schedule = schedules
-        self.state: State = state
-        self.context: TuneContext = state.context
-        self.cost_model: CostModel = state.cost_model
-        self.postprocs = state.search_strategy.postprocs
+                 optimizer_logging,
+                 postprocs,
+                 context,
+                 cost_model,
+                 work_dir,
+                 mod,
+                 rand_state):
+        self.schedule: Schedule = schedule
+        self.context: TuneContext = context
+        self.cost_model: CostModel = cost_model
+        self.postprocs = postprocs
         self.validate_schedules: bool = validate_schedules
         self.max_trials: int = max_trials
         self.optimizer_logging: bool = optimizer_logging
+        self.context = context
+        self.work_dir = work_dir
+        self.mod = mod
+        self.rand_state = rand_state
 
         self.parallel_extend_tuning: bool = False
         self.log_tuning_traces: bool = False
@@ -207,41 +277,21 @@ class BayOptTuner:
             self._setup_optimizer_dir()
 
     def tune(self) -> Schedule:
-        tune_schedules: List[Schedule] = self.schedules
-        num_sch_to_tuner: int = len(tune_schedules)
+        return self._tune_schedule(self.schedule)
 
-        if self.state.search_strategy.threaded:
-            # Threaded
-            with Profiler.timeit("BayOptSearch/Tuner/Tune"):
-                with ThreadPoolExecutor(max_workers=self.context.num_threads) as executor:
-                    # Submit all tasks to the executor
-                    futures = [executor.submit(self._tune_schedule, tune_schedules[id], id)
-                               for id in range(num_sch_to_tuner)]
-
-                    # Process future results as they complete
-                    for future in as_completed(futures):
-                        tuned_schedule, id = future.result()
-                        tune_schedules[id] = tuned_schedule
-        else:
-            # Non Threaded
-            for id in range(num_sch_to_tuner):
-                tuned_schedule = self._tune_schedule(tune_schedules[id], id)
-                tune_schedules[id] = tuned_schedule
-
-        return tune_schedules
-
-    def _tune_schedule(self, untuned_sch: Schedule, id: int) -> Union[Schedule, int]:
+    def _tune_schedule(self, untuned_sch: Schedule) -> Union[Schedule, int]:
         sch_phase_one, scores = self._tune_tiling_and_unrole(untuned_sch)
-        sch_phase_two, scores = self._tune_parallel_annotation(sch_phase_one, scores)
+        sch_phase_two = sch_phase_one
+        # sch_phase_two, scores = self._tune_parallel_annotation(sch_phase_one, scores)
 
         if scores is not None and len(scores) == 3:
-            self.state.logger(logging.DEBUG, __name__, current_line_number(),
-                              f"Score: {scores[0]:.4f} ==> {scores[1]:.4f} ==> {scores[2]:.4f}")
+            logger(logging.DEBUG, __name__, current_line_number(),
+                   f"Score: {scores[0]:.4f} ==> {scores[1]:.4f} ==> {scores[2]:.4f}")
         elif scores is not None:
-            self.state.logger(logging.DEBUG, __name__, current_line_number(),
-                              f"Score: {scores[0]:.4f} ==> {scores[1]:.4f}")
+            logger(logging.DEBUG, __name__, current_line_number(),
+                   f"Score: {scores[0]:.4f} ==> {scores[1]:.4f}")
 
-        return sch_phase_two, id
+        return sch_phase_two
 
     def _tune_parallel_annotation(self, sch: Schedule, scores: List[int]) -> Union[Schedule, List[int]]:
         possible_decision_dict: Dict[Instruction, List[int]] = dict()
@@ -253,7 +303,7 @@ class BayOptTuner:
                 possible_decisions = list(get_possible_parallel_annotate_decisions(
                                                      sch=sch,
                                                      trace=sch.trace,
-                                                     rand_state=forkseed(self.state.search_strategy.rand_state),
+                                                     rand_state=forkseed(self.rand_state),
                                                      inst=inst,
                                                      max_parallel_extent=16*cpu_count(logical=True)))
                 if len(possible_decisions) != 0:
@@ -270,7 +320,7 @@ class BayOptTuner:
                 new_sch: Schedule = self._apply_annotation_to_trace(trace=sch.trace,
                                                                     ann_inst=inst,
                                                                     ann_val=decision,
-                                                                    mod=self.state.mod)
+                                                                    mod=self.mod)
                 if new_sch is not None:
                     schedules.append(new_sch)
 
@@ -289,19 +339,19 @@ class BayOptTuner:
 
         # Check the number of tuneable instructions
         if len(pbounds) == 0:
-            self.state.logger(logging.DEBUG, __name__, current_line_number(),
-                              "No tuneable decision was found in trace")
+            logger(logging.DEBUG, __name__, current_line_number(),
+                   "No tuneable decision was found in trace")
             return untuned_sch, [pre_tuning_score, 0]
         elif len(pbounds) > 20:
-            self.state.logger(logging.WARN, __name__, current_line_number(),
-                              "Current workload contains more than 20 tuneable instructions." +
-                              "Bayesian Optimization may not be effective.")
+            logger(logging.WARN, __name__, current_line_number(),
+                   "Current workload contains more than 20 tuneable instructions." +
+                   "Bayesian Optimization may not be effective.")
 
         optimizer = BayesianOptimization(
             f=None,  # We register results with the optimizer ourselves
             pbounds=pbounds,
             verbose=2,
-            random_state=forkseed(self.state.search_strategy.rand_state),
+            random_state=forkseed(self.rand_state),
             allow_duplicate_points=True
         )
 
@@ -316,15 +366,15 @@ class BayOptTuner:
             next_decisions: dict = optimizer.suggest(utility)
 
             if next_decisions is None:
-                self.state.logger(logging.ERROR, __name__, current_line_number(),
-                                  "Optimizer failed to predict next decision")
+                logger(logging.ERROR, __name__, current_line_number(),
+                       "Optimizer failed to predict next decision")
                 return untuned_sch, [pre_tuning_score, 0]
 
             sch: Schedule = self._get_schedule_with_predicted_decisons(untuned_sch, next_decisions)
 
             if sch is None:
-                self.state.logger(logging.DEBUG, __name__, current_line_number(),
-                                  "Failed to apply tuning decisions to trace")
+                logger(logging.DEBUG, __name__, current_line_number(),
+                       "Failed to apply tuning decisions to trace")
                 current_trial += 1
                 continue
 
@@ -332,8 +382,8 @@ class BayOptTuner:
             target = self._predict_normalized_score(sch)
 
             if self.log_tuning_traces:
-                self.state.logger(logging.INFO, __name__, current_line_number(),
-                                  f"Target {target} Schedule: \n {sch.trace}\n{sch.mod}")
+                logger(logging.INFO, __name__, current_line_number(),
+                       f"Target {target} Schedule: \n {sch.trace}\n{sch.mod}")
 
             # register score with optimizer, to improve next prediction
             optimizer.register(
@@ -359,15 +409,15 @@ class BayOptTuner:
         assert str(tuned_sch.trace) == str(copy.trace)
 
         if tuned_sch is None:
-            self.state.logger(logging.DEBUG, __name__, current_line_number(),
-                              "Failed to apply tuning decisions to trace")
+            logger(logging.DEBUG, __name__, current_line_number(),
+                   "Failed to apply tuning decisions to trace")
             return untuned_sch, scores
 
         self._post_tuning_log_copy(tuned_sch=tuned_sch, untuned_sch=untuned_sch)
 
         if self.log_tuning_traces:
-            self.state.logger(logging.INFO, __name__, current_line_number(),
-                              f"Result {scores[0]} Schedule: \n{tuned_sch.trace}\n{tuned_sch.mod}\n\n\n\n")
+            logger(logging.INFO, __name__, current_line_number(),
+                   f"Result {scores[0]} Schedule: \n{tuned_sch.trace}\n{tuned_sch.mod}\n\n\n\n")
         return tuned_sch, scores
 
     def _get_schedule_with_predicted_decisons(self, untuned_sch: Schedule, next_decisions: dict) -> Schedule | None:
@@ -390,17 +440,17 @@ class BayOptTuner:
                 decision = [int(x) for x in decision]
 
                 if expected_decision != decision:
-                    self.state.logger(logging.ERROR, __name__, current_line_number(),
-                                      f"Could not find expected decision in trace for {inst} " +
-                                      f"Expected: {expected_decision} Got: {decision}")
+                    logger(logging.ERROR, __name__, current_line_number(),
+                           f"Could not find expected decision in trace for {inst} " +
+                           f"Expected: {expected_decision} Got: {decision}")
 
             if inst.kind.name == "SampleCategorical":
                 expected_decision = matched_decisions[inst]
 
                 if expected_decision != decision:
-                    self.state.logger(logging.ERROR, __name__, current_line_number(),
-                                      f"Could not find expected decision in trace for {inst} " +
-                                      f"Expected: {expected_decision} Got: {decision}")
+                    logger(logging.ERROR, __name__, current_line_number(),
+                           f"Could not find expected decision in trace for {inst} " +
+                           f"Expected: {expected_decision} Got: {decision}")
 
     def _apply_decisions(self, untuned_sch: Schedule, decisions: Dict[Instruction, DECISION_TYPE]) -> Schedule | None:
         # Get the schedules trace
@@ -411,7 +461,7 @@ class BayOptTuner:
             trace = trace.with_decision(inst=inst, decision=decision, remove_postproc=True)
 
         pp = ThreadedTraceApply(postprocs=self.postprocs)
-        return pp.apply(mod=self.state.mod, trace=trace, rand_state=forkseed(self.state.search_strategy.rand_state))
+        return pp.apply(mod=self.mod, trace=trace, rand_state=forkseed(self.rand_state))
 
     def _post_tuning_log_copy(self, tuned_sch: Schedule, untuned_sch: Schedule):
         if self.optimizer_logging:
@@ -453,7 +503,7 @@ class BayOptTuner:
             os.mkdir(self.path_optimizer_dir)
 
     def _get_optimizer_dir_path(self) -> str:
-        work_dir: str = self.state.work_dir
+        work_dir: str = self.work_dir
         return os.path.join(work_dir, "optimizer_logs")
 
     def _find_matching_instruction(self, sch: Schedule, inst: Instruction):
@@ -543,18 +593,30 @@ class State:
                  design_spaces_schedules: List[Schedule],
                  database: Optional["Database"],
                  cost_model: Optional["CostModel"],
-                 search_strategy: "BayesianOptimizationSearch",
-                 context: "TuneContext"
+                 rand_state: np.int64,
+                 context: "TuneContext",
+                 postprocs,
+                 population_size,
+                 init_min_unmeasured,
+                 save_optimizer,
+                 max_fail_count,
+                 threaded
                  ):
         self.max_trials = max_trials
         self.num_trials_per_iter = num_trials_per_iter
         self.design_space_schedules = design_spaces_schedules
         self.database: Database = database
         self.cost_model: CostModel = cost_model
-        self.search_strategy: BayesianOptimizationSearch = search_strategy
+        self.rand_state = rand_state
+        self.postprocs = postprocs
+        self.population_size = population_size
+        self.init_min_unmeasured = init_min_unmeasured
+        self.save_optimizer = save_optimizer
+        self.max_fail_count = max_fail_count
+        self.threaded = threaded
+
         self.context: TuneContext = context
-        self.mod = context.mod
-        self.logger = get_logging_func(get_logger(__name__))
+        self.mod: IRModule = context.mod
         self.work_dir: str = self._get_work_dir()
 
         self.design_spaces = []
@@ -569,7 +631,7 @@ class State:
         self.per_thread_data_ = [PerThreadData() for i in range(self.context.num_threads)]
         for i in range(self.context.num_threads):
             self.per_thread_data_[i].mod = copy.deepcopy(self.mod)
-            self.per_thread_data_[i].rand_state = forkseed(self.search_strategy.rand_state)
+            self.per_thread_data_[i].rand_state = forkseed(self.rand_state)
 
         self.workload = database.commit_workload(self.mod)
 
@@ -595,13 +657,13 @@ class State:
 
             # Get the actual number of picked traces, (there may have not been enough in the database)
             actual_num_picked = len(picked_traces)
-            pp: ThreadedTraceApply = ThreadedTraceApply(self.search_strategy.postprocs)
+            pp: ThreadedTraceApply = ThreadedTraceApply(self.postprocs)
 
             results: List[Schedule] = [None] * actual_num_picked
             for i in range(actual_num_picked):
                 process_database_trace(i, self.per_thread_data_, picked_traces, pp, results, self.context.num_threads)
-            self.logger(logging.INFO, __name__, current_line_number(),
-                        f"Picked {len(results)} schedules from database")
+            logger(logging.INFO, __name__, current_line_number(),
+                   f"Picked {len(results)} schedules from database")
             return results
 
     def epsilon_greedy_mix(self, exploit_list, explore_list, epsilon, num, fill_missing: bool):
@@ -623,11 +685,11 @@ class State:
                     mixed_list.append(random.choice(explore_list))
                     num_explore_schedules += 1
 
-            self.logger(logging.INFO, __name__, current_line_number(),
-                        f"Epsilon Greedy mixed {num_explore_schedules} random schedules into tuning set")
+            logger(logging.INFO, __name__, current_line_number(),
+                   f"Epsilon Greedy mixed {num_explore_schedules} random schedules into tuning set")
         else:
-            self.logger(logging.INFO, __name__, current_line_number(),
-                        f"Epsilon Greedy mixed {len(mixed_list)} random schedules into runner set")
+            logger(logging.INFO, __name__, current_line_number(),
+                   f"Epsilon Greedy mixed {len(mixed_list)} random schedules into runner set")
         return mixed_list
 
     def generate_measure_candidates(self) -> Optional[List[MeasureCandidate]]:
@@ -651,15 +713,15 @@ class State:
             measured_schedules = self._pick_best_from_database(num_measured_schedules)
 
         # Sample a new population of random schedules
-        unmeasured_schedules: List[Schedule] = self._sample_initial_population(self.search_strategy.population_size)
+        unmeasured_schedules: List[Schedule] = self._sample_initial_population(self.population_size)
 
         # Check if minimum amount of schedules were sampled
-        if (len(unmeasured_schedules) < self.search_strategy.init_min_unmeasured):
+        if (len(unmeasured_schedules) < self.init_min_unmeasured):
             raise ValueError  # Specify a better error here
 
-        self.logger(logging.INFO, __name__, current_line_number(),
-                    f"Prepared a population of {len(measured_schedules) + len(unmeasured_schedules)} " +
-                    "schedules for selection")
+        logger(logging.INFO, __name__, current_line_number(),
+               f"Prepared a population of {len(measured_schedules) + len(unmeasured_schedules)} " +
+               "schedules for selection")
 
         # Pick the random and untuned schedules for running (prevent cost model from overfitting)
         random_schedules = self.epsilon_greedy_mix(exploit_list=[],
@@ -670,7 +732,6 @@ class State:
 
         # Get the best schedules from population
         best_unmeasured_schedules, scores_unmeasured = self.get_top_k_schedules(unmeasured_schedules, 32)
-        print(scores_unmeasured)
 
         # Pick a mix of measured schedules and unmeasured for tuning.
         # The number of schedules send to the tuner is decided by how many random
@@ -703,31 +764,26 @@ class State:
             num_trials = 10
             optimizer_logging = False
         else:
-            num_trials = 64
-            optimizer_logging = True and self.search_strategy.save_optimizer
+            num_trials = 30
+            optimizer_logging = True and self.save_optimizer
 
         num_sch_to_tuner = len(tune_schedules)
-        self.logger(logging.INFO, __name__, current_line_number(),
-                    f"Sending {num_sch_to_tuner} schedule(s) to bayesian optimization tuner")
+        logger(logging.INFO, __name__, current_line_number(),
+               f"Sending {num_sch_to_tuner} schedule(s) to bayesian optimization tuner")
 
-        bay_opt_tuner = BayOptTuner(schedules=tune_schedules,
-                                    state=self,
-                                    validate_schedules=True,
-                                    max_trials=num_trials,
-                                    optimizer_logging=optimizer_logging)
+        tuned_schedules = callparallel(tune_schedules, num_trials, optimizer_logging,
+                                       self.postprocs, self.threaded, self)
 
-        tuned_schedules: List[Schedule] = bay_opt_tuner.tune()
-
-        self.logger(logging.INFO, __name__, current_line_number(), "Bayesian optimization tuner finished")
+        logger(logging.INFO, __name__, current_line_number(), "Bayesian optimization tuner finished")
         return tuned_schedules
 
     def _sample_initial_population(self, num_traces: int) -> List[Schedule]:
         with Profiler.timeit("BayOptSearch/GenerateCandidates/SamplePopulation"):
-            postproc = ThreadedTraceApply(self.search_strategy.postprocs)
+            postproc = ThreadedTraceApply(self.postprocs)
             output_schedules: List[Schedule] = []
             fail_count: int = 0
-            while (fail_count < self.search_strategy.max_fail_count and
-                   len(output_schedules) < self.search_strategy.init_min_unmeasured):
+            while (fail_count < self.max_fail_count and
+                   len(output_schedules) < self.init_min_unmeasured):
 
                 results = [None] * num_traces
 
@@ -754,8 +810,8 @@ class State:
                         found_new = True
                         output_schedules.append(results[i])
                 fail_count += not found_new
-                self.logger(logging.INFO, __name__, current_line_number(),
-                            f"Sampled {len(output_schedules)} new random schedules")
+                logger(logging.INFO, __name__, current_line_number(),
+                       f"Sampled {len(output_schedules)} new random schedules")
                 return output_schedules
 
     def get_top_k_schedules(self, schedules: List[Schedule], k: int) -> Union[List[Schedule] | List[int]]:
@@ -833,8 +889,14 @@ class BayesianOptimizationSearch(PySearchStrategy):
                            design_spaces_schedules=design_spaces,
                            database=database,
                            cost_model=cost_model,
-                           search_strategy=self,
-                           context=self.context)
+                           context=self.context,
+                           postprocs=self.postprocs,
+                           rand_state=self.rand_state,
+                           population_size=self.population_size,
+                           init_min_unmeasured=self.init_min_unmeasured,
+                           save_optimizer=self.save_optimizer,
+                           max_fail_count=self.max_fail_count,
+                           threaded=self.threaded)
 
     def post_tuning(self) -> None:
         """Post-tuning for the search strategy."""
