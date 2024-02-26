@@ -410,13 +410,12 @@ class XGBModel(PyCostModel):
                 data_size += len(costs)
             # Step 3. Load the model
             if os.path.exists(model_path):
-                booster = xgb.Booster()
-                booster.load_model(model_path)
+                self.booster = xgb.Booster()
+                self.booster.load_model(model_path)
             else:
                 self.booster = None
         self.data = data
         self.data_size = data_size
-        self.booster = booster
 
     def save(self, path: str) -> None:
         """Save the cost model to given file location.

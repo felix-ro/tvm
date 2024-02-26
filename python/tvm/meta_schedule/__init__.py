@@ -52,4 +52,5 @@ from .task_scheduler import TaskScheduler
 from .tir_integration import tune_tir
 from .tune import tune_tasks
 from .tune_context import TuneContext
+from .measure_candidate import MeasureCandidate
 from .utils import derived_object

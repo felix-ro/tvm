@@ -29,7 +29,7 @@ from tvm.runtime import Object
 
 from .. import _ffi_api
 from ..runner import RunnerResult
-from ..search_strategy import MeasureCandidate
+from ..measure_candidate import MeasureCandidate
 from ..tune_context import TuneContext
 from ..utils import _get_default_str
 
