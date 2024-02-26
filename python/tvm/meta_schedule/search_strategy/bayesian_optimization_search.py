@@ -238,13 +238,16 @@ class TuningSummary:
             self.improvements.append(tuning_report.phase_two_tuning_score - tuning_report.pre_tuning_score)
             if tuning_report.phase_two_tuning_score > self.best_score:
                 self.best_score = tuning_report.phase_two_tuning_score
-        else:
+        elif tuning_report.pre_tuning_score and tuning_report.phase_one_tuning_score:
             self.improvements.append(tuning_report.phase_one_tuning_score - tuning_report.pre_tuning_score)
             if tuning_report.phase_one_tuning_score > self.best_score:
                 self.best_score = tuning_report.phase_one_tuning_score
 
     def get_avg_improvement(self):
-        return sum(self.improvements) / len(self.improvements)
+        if len(self.improvements) > 0:
+            return sum(self.improvements) / len(self.improvements)
+        else:
+            return 0
 
     def log(self):
         logger(logging.INFO, __name__, current_line_number(),
@@ -632,7 +635,10 @@ class BayOptTuner:
         directory = os.path.dirname(self.path_optimizer_dir)
 
         if directory and not os.path.exists(self.path_optimizer_dir):
-            os.mkdir(self.path_optimizer_dir)
+            try:
+                os.mkdir(self.path_optimizer_dir)
+            except Exception:
+                pass
 
     def _get_optimizer_dir_path(self) -> str:
         work_dir: str = self.work_dir
@@ -893,16 +899,16 @@ class TuningState:
 
         num_trials = 0
         optimizer_logging = False
-        if num_workload_db_entries < 124:
+        if num_workload_db_entries < 64:
             # XGB Cost Model is not yet accurate
             num_trials = 1
             optimizer_logging = False
-        elif 124 <= num_workload_db_entries and num_workload_db_entries < 256:
-            num_trials = 10
+        elif 64 <= num_workload_db_entries and num_workload_db_entries < 256:
+            num_trials = 20
             optimizer_logging = False
         else:
-            num_trials = 30
-            optimizer_logging = True and self.save_optimizer
+            num_trials = 40
+            optimizer_logging = False and self.save_optimizer
 
         num_sch_to_tuner = len(tune_candidates)
         logger(logging.INFO, __name__, current_line_number(),
@@ -965,7 +971,7 @@ class BayesianOptimizationSearch(PySearchStrategy):
     init_measured_ratio = 0.1
     init_min_unmeasured = 50
     max_fail_count = 50
-    threaded: bool = True
+    threaded: bool = False
     save_optimizer: bool = True
 
     def _initialize_with_tune_context(self, context: "TuneContext") -> None:
