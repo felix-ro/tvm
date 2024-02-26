@@ -212,9 +212,84 @@ class TuningCandidate:
         return [candidate.sch for candidate in candidates]
 
 
+class TuningReport:
+    pre_tuning_score: float = None
+    phase_one_tuning_score: float = None
+    phase_two_tuning_score: float = None
+
+    discarded_tune_schedule: bool = False
+    tune_failure: bool = False
+    optimizer_failure: bool = False
+    num_tuneable_insts: int = None
+
+
+class TuningSummary:
+    improvements: List[float] = []
+    best_score: float = 0.0
+    num_tune_failures: int = 0
+    num_optimizer_failures: int = 0
+
+    def enter_tuning_report(self, tuning_report: TuningReport):
+        if tuning_report.tune_failure:
+            self.num_tune_failures += 1
+        elif tuning_report.optimizer_failure:
+            self.num_optimizer_failures += 1
+        elif tuning_report.pre_tuning_score and tuning_report.phase_two_tuning_score:
+            self.improvements.append(tuning_report.phase_two_tuning_score - tuning_report.pre_tuning_score)
+            if tuning_report.phase_two_tuning_score > self.best_score:
+                self.best_score = tuning_report.phase_two_tuning_score
+        else:
+            self.improvements.append(tuning_report.phase_one_tuning_score - tuning_report.pre_tuning_score)
+            if tuning_report.phase_one_tuning_score > self.best_score:
+                self.best_score = tuning_report.phase_one_tuning_score
+
+    def get_avg_improvement(self):
+        return sum(self.improvements) / len(self.improvements)
+
+    def log(self):
+        logger(logging.INFO, __name__, current_line_number(),
+               f"Tuner: Schedule cost model score improved by an average of {self.get_avg_improvement():.4f}")
+        logger(logging.INFO, __name__, current_line_number(),
+               f"Tuner: Best Score {self.best_score:.4f}")
+        logger(logging.INFO, __name__, current_line_number(),
+               f"Tuner: Number of Tune Failures {self.num_tune_failures}")
+        logger(logging.INFO, __name__, current_line_number(),
+               f"Tuner: Number of Optimizer Failures {self.num_optimizer_failures}")
+
+
+def analyse_tuning_report(tuning_report: TuningReport, tuning_summary: TuningSummary):
+    # Due to the use of multiprocessing we need to log results outside of tuner.
+    if tuning_report.num_tuneable_insts == 0:
+        logger(logging.DEBUG, __name__, current_line_number(),
+               "No tuneable decision was found in trace")
+    elif tuning_report.num_tuneable_insts >= 20:
+        logger(logging.WARN, __name__, current_line_number(),
+               "Current workload contains more than 20 tuneable instructions." +
+               "Bayesian Optimization may not be effective.")
+    elif tuning_report.tune_failure:
+        logger(logging.DEBUG, __name__, current_line_number(),
+               "Failed to apply tuning decisions to trace")
+    elif tuning_report.optimizer_failure:
+        logger(logging.ERROR, __name__, current_line_number(),
+               "Optimizer failed to predict next decision")
+    elif tuning_report.discarded_tune_schedule and tuning_report.pre_tuning_score:
+        logger(logging.DEBUG, __name__, current_line_number(),
+               f"Score: {tuning_report.pre_tuning_score:.4f} discarded tuning schedule, measuring random instead")
+    elif (tuning_report.pre_tuning_score and tuning_report.phase_two_tuning_score
+          and tuning_report.phase_one_tuning_score):
+        logger(logging.DEBUG, __name__, current_line_number(),
+               f"Score: {tuning_report.pre_tuning_score:.4f} ==> " +
+               f"{tuning_report.phase_one_tuning_score:.4f} ==> " +
+               f"{tuning_report.phase_two_tuning_score:.4f}")
+    else:
+        logger(logging.DEBUG, __name__, current_line_number(),
+               f"Score: {tuning_report.pre_tuning_score:.4f} ==> {tuning_report.phase_one_tuning_score:.4f}")
+
+
 def call_bayopt_parallel(tune_candidates: List[TuningCandidate], num_trials: int,
-                         optimizer_logging: bool, postprocs, threaded: bool, state: "State"):
+                         optimizer_logging: bool, postprocs, threaded: bool, state: "TuningState"):
     tuned_schedules = []
+    tuning_summary = TuningSummary()
 
     with Profiler.timeit("BayOptSearch/Tuner/Tune"):
         if threaded:
@@ -235,35 +310,35 @@ def call_bayopt_parallel(tune_candidates: List[TuningCandidate], num_trials: int
 
                 for future in as_completed(futures):
                     try:
-                        trace_json, scores = future.result()
+                        trace_json, tuning_report = future.result()
                         sch = Schedule(mod=state.mod,
                                        seed=state.rand_state,
                                        debug_mask=0,
                                        error_render_level="none",)
                         Trace.apply_json_to_schedule(trace_json, sch)
                         tuned_schedules.append(sch)
-                        if scores is not None and len(scores) == 3:
-                            logger(logging.DEBUG, __name__, current_line_number(),
-                                   f"Score: {scores[0]:.4f} ==> {scores[1]:.4f} ==> {scores[2]:.4f}")
-                        elif scores is not None:
-                            logger(logging.DEBUG, __name__, current_line_number(),
-                                   f"Score: {scores[0]:.4f} ==> {scores[1]:.4f}")
+                        analyse_tuning_report(tuning_report=tuning_report,
+                                              tuning_summary=None)
+                        tuning_summary.enter_tuning_report(tuning_report)
                     except Exception as e:
                         print(f'Task generated an exception: {e}')
         else:
             for candidate in tune_candidates:
-                tuned_schedule = thread_helper(state.mod,
-                                               candidate,
-                                               num_trials,
-                                               optimizer_logging,
-                                               postprocs,
-                                               state.context,
-                                               state.cost_model,
-                                               state.work_dir,
-                                               state.rand_state)
-
+                tuned_schedule, tuning_report = thread_helper(state.mod,
+                                                              candidate,
+                                                              num_trials,
+                                                              optimizer_logging,
+                                                              postprocs,
+                                                              state.context,
+                                                              state.cost_model,
+                                                              state.work_dir,
+                                                              state.rand_state)
                 tuned_schedules.append(tuned_schedule)
+                analyse_tuning_report(tuning_report=tuning_report,
+                                      tuning_summary=None)
+                tuning_summary.enter_tuning_report(tuning_report)
 
+    tuning_summary.log()
     return tuned_schedules
 
 
@@ -309,8 +384,8 @@ def multiprocessing_helper(mod: IRModule, trace: Trace, measured: bool, num_tria
                                 mod=mod,
                                 rand_state=rand_state)
 
-    sch, scores = bay_opt_tuner.tune()
-    return sch.trace.as_json(), scores
+    sch, tuning_report = bay_opt_tuner.tune()
+    return sch.trace.as_json(), tuning_report
 
 
 class BayOptTuner:
@@ -342,22 +417,20 @@ class BayOptTuner:
         self.parallel_extend_tuning: bool = False
         self.log_tuning_traces: bool = False
         self.instruction_decsion_map = dict()
+        self.tuning_report: TuningReport = TuningReport()
         self.possible_annotate_decisions: Dict[str, List[int]] = dict()
         self.path_optimizer_dir: str = self._get_optimizer_dir_path()
 
         if self.optimizer_logging:
             self._setup_optimizer_dir()
 
-    def tune(self) -> Schedule:
-        return self._tune_schedule(self.schedule)
+    def tune(self) -> Union[Schedule | TuningReport]:
+        sch_phase_one: Schedule = self._tune_tiling_and_unrole(self.schedule)
+        sch_phase_two: Schedule = self._tune_parallel_annotation(sch_phase_one)
 
-    def _tune_schedule(self, untuned_sch: Schedule) -> Union[Schedule, int]:
-        sch_phase_one, scores = self._tune_tiling_and_unrole(untuned_sch)
-        sch_phase_two, scores = self._tune_parallel_annotation(sch_phase_one, scores)
+        return sch_phase_two, self.tuning_report
 
-        return sch_phase_two, scores
-
-    def _tune_parallel_annotation(self, sch: Schedule, scores: List[int]) -> Union[Schedule, List[int]]:
+    def _tune_parallel_annotation(self, sch: Schedule) -> Schedule:
         possible_decision_dict: Dict[Instruction, List[int]] = dict()
 
         # Find all parallel annotations and possible decisions
@@ -374,7 +447,7 @@ class BayOptTuner:
 
         # Return if no annotation
         if not bool(possible_decision_dict):
-            return sch, scores
+            return sch
 
         # Prepare all combinations
         schedules: List[Schedule] = []
@@ -390,25 +463,22 @@ class BayOptTuner:
         # Return the best combination
         bests, top_scores = get_top_k_schedules(self.context, self.cost_model, schedules, 1)
 
-        if top_scores[0] <= scores[1]:
-            return sch, scores
+        # if top score worse than phase one score, return phase one schedule
+        if top_scores[0] <= self.tuning_report.phase_one_tuning_score:
+            return sch
         else:
-            scores.append(top_scores[0])
-            return bests[0], scores
+            self.tuning_report.phase_two_tuning_score = top_scores[0]
+            return bests[0]
 
-    def _tune_tiling_and_unrole(self, untuned_sch: Schedule) -> Union[Schedule, List[int]]:
+    def _tune_tiling_and_unrole(self, untuned_sch: Schedule) -> Schedule:
         pre_tuning_score = self._predict_normalized_score(untuned_sch)
+        self.tuning_report.pre_tuning_score = pre_tuning_score
         pbounds = self._get_parameters(untuned_sch=untuned_sch)
 
         # Check the number of tuneable instructions
-        if len(pbounds) == 0:
-            logger(logging.DEBUG, __name__, current_line_number(),
-                   "No tuneable decision was found in trace")
-            return untuned_sch, [pre_tuning_score, 0]
-        elif len(pbounds) > 20:
-            logger(logging.WARN, __name__, current_line_number(),
-                   "Current workload contains more than 20 tuneable instructions." +
-                   "Bayesian Optimization may not be effective.")
+        self.tuning_report.num_tuneable_insts = len(pbounds)
+        if self.tuning_report.num_tuneable_insts == 0:
+            return untuned_sch
 
         optimizer = BayesianOptimization(
             f=None,  # We register results with the optimizer ourselves
@@ -421,7 +491,8 @@ class BayOptTuner:
         optimizer = self._configure_optimizer_logging(untuned_sch=untuned_sch, optimizer=optimizer)
         utility = UtilityFunction(kind="ucb", kappa=5, xi=0.0)
 
-        max_decisions = (0, None)
+        max_target: float = 0.0
+        max_decisions: Dict = None
 
         current_trial: int = 0
         while (current_trial < self.max_trials):
@@ -429,15 +500,12 @@ class BayOptTuner:
             next_decisions: dict = optimizer.suggest(utility)
 
             if next_decisions is None:
-                logger(logging.ERROR, __name__, current_line_number(),
-                       "Optimizer failed to predict next decision")
-                return untuned_sch, [pre_tuning_score, 0]
+                self.tuning_report.optimizer_failure = True
+                return untuned_sch
 
             sch: Schedule = self._get_schedule_with_predicted_decisons(untuned_sch, next_decisions)
 
             if sch is None:
-                logger(logging.DEBUG, __name__, current_line_number(),
-                       "Failed to apply tuning decisions to trace")
                 current_trial += 1
                 continue
 
@@ -453,41 +521,36 @@ class BayOptTuner:
                 params=next_decisions,
                 target=target,
             )
-            # Save run info
-            if target >= max_decisions[0]:
-                max_decisions = (target, next_decisions)
+            # Save best run info
+            if target >= max_target or max_decisions is None:
+                max_target = target
+                max_decisions = next_decisions
 
             current_trial += 1
 
-        if max_decisions[0] is None or max_decisions[1] is None:
-            return untuned_sch, [pre_tuning_score, 0]
-
-        # Get the best decisions construct schedule again
-        post_tuning_score = max_decisions[0]
-        scores: List[int] = [pre_tuning_score, post_tuning_score]
+        # Save the tuning score
+        self.tuning_report.phase_one_tuning_score = max_target
 
         # If the original schedule was never measured (random schedule), and tuning did not improve
         # its score we return the original schedule. However, if we have already measured the schedule
         # (database schedule) then we will measure the worse one instead of measuring the same one twice
-        if post_tuning_score <= pre_tuning_score and not self.measured:
-            return untuned_sch, scores
+        if max_target <= pre_tuning_score and not self.measured:
+            self.tuning_report.discarded_tune_schedule = True
+            return untuned_sch
 
         # Construct Schedule from best decisions found with BayOpt in this tuning run (not overall)
-        tuned_sch: Schedule = self._get_schedule_with_predicted_decisons(untuned_sch, max_decisions[1])
-        copy = self._get_schedule_with_predicted_decisons(untuned_sch, max_decisions[1])
-        assert str(tuned_sch.trace) == str(copy.trace)
+        tuned_sch: Schedule = self._get_schedule_with_predicted_decisons(untuned_sch, max_decisions)
 
         if tuned_sch is None:
-            logger(logging.DEBUG, __name__, current_line_number(),
-                   "Failed to apply tuning decisions to trace")
-            return untuned_sch, scores
+            self.tuning_report.tune_failure = True
+            return untuned_sch
 
         self._post_tuning_log_copy(tuned_sch=tuned_sch, untuned_sch=untuned_sch)
 
         if self.log_tuning_traces:
             logger(logging.INFO, __name__, current_line_number(),
-                   f"Result {scores[0]} Schedule: \n{tuned_sch.trace}\n{tuned_sch.mod}\n\n\n\n")
-        return tuned_sch, scores
+                   f"Schedule: \n{tuned_sch.trace}\n{tuned_sch.mod}\n\n\n\n")
+        return tuned_sch
 
     def _get_schedule_with_predicted_decisons(self, untuned_sch: Schedule, next_decisions: dict) -> Schedule | None:
         decisions: Dict[Instruction, DECISION_TYPE] = self._build_decision_dict(untuned_sch, next_decisions)
@@ -655,7 +718,7 @@ class BayOptTuner:
         return result_decisions
 
 
-class State:
+class TuningState:
     def __init__(self,
                  max_trials: int,
                  num_trials_per_iter: int,
@@ -735,7 +798,8 @@ class State:
                    f"Picked {len(results)} schedules from database")
             return results
 
-    def epsilon_greedy_mix(self, exploit_list, explore_list, epsilon, num, fill_missing: bool) -> List[TuningCandidate]:
+    def epsilon_greedy_mix(self, exploit_list: List[Schedule], explore_list: List[Schedule],
+                           epsilon: float, num: int, fill_missing: bool) -> List[TuningCandidate]:
         num_explore_schedules = 0
         mixed_list: TuningCandidate = []
         for _ in range(num):
@@ -895,7 +959,7 @@ class State:
 @derived_object
 class BayesianOptimizationSearch(PySearchStrategy):
     context: "TuneContext" = None
-    state: State = None
+    state: TuningState = None
 
     population_size = 1024
     init_measured_ratio = 0.1
@@ -945,19 +1009,19 @@ class BayesianOptimizationSearch(PySearchStrategy):
             print("ValueError: `PreTuning` is already invoked without corresponding `PostTuning`.")
             raise ValueError
 
-        self.state = State(max_trials=max_trials,
-                           num_trials_per_iter=num_trials_per_iter,
-                           design_spaces_schedules=design_spaces,
-                           database=database,
-                           cost_model=cost_model,
-                           context=self.context,
-                           postprocs=self.postprocs,
-                           rand_state=self.rand_state,
-                           population_size=self.population_size,
-                           init_min_unmeasured=self.init_min_unmeasured,
-                           save_optimizer=self.save_optimizer,
-                           max_fail_count=self.max_fail_count,
-                           threaded=self.threaded)
+        self.state = TuningState(max_trials=max_trials,
+                                 num_trials_per_iter=num_trials_per_iter,
+                                 design_spaces_schedules=design_spaces,
+                                 database=database,
+                                 cost_model=cost_model,
+                                 context=self.context,
+                                 postprocs=self.postprocs,
+                                 rand_state=self.rand_state,
+                                 population_size=self.population_size,
+                                 init_min_unmeasured=self.init_min_unmeasured,
+                                 save_optimizer=self.save_optimizer,
+                                 max_fail_count=self.max_fail_count,
+                                 threaded=self.threaded)
 
     def post_tuning(self) -> None:
         """Post-tuning for the search strategy."""
