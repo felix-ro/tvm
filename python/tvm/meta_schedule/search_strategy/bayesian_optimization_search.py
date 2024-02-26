@@ -12,8 +12,7 @@ from ..logging import get_logger, get_logging_func
 from ..profiler import Profiler
 
 from ..cost_model import CostModel
-from ...contrib.popen_pool import PopenPoolExecutor, StatusKind
-from concurrent.futures import ThreadPoolExecutor, as_completed, ProcessPoolExecutor
+from concurrent.futures import as_completed, ProcessPoolExecutor
 
 if TYPE_CHECKING:
     from ..database import Database, TuningRecord
@@ -200,6 +199,17 @@ class PerThreadData:
         self.rand_state = np.int64(-1)
 
 
+class TuningCandidate:
+    sch: Schedule = None
+    mod: IRModule = None
+    measured: bool = False
+
+    def __init__(self, sch: Schedule, mod: IRModule, measured: bool) -> None:
+        self.sch = sch
+        self.mod = mod
+        self.measured
+
+
 def call_bayopt_parallel(tune_schedules: List[Schedule], num_trials: int,
                          optimizer_logging: bool, postprocs, threaded: bool, state: "State"):
     tuned_schedules = []
@@ -207,46 +217,6 @@ def call_bayopt_parallel(tune_schedules: List[Schedule], num_trials: int,
     with Profiler.timeit("BayOptSearch/Tuner/Tune"):
         if threaded:
             state.cost_model.save(os.path.join(state.work_dir, "cost_model"))
-            # Here we restart the PopenPool everytime because of a known memory leak issue with the
-            # PopenPool workers after a couple times of usage. We don't apply the same to runners to
-            # avoid potential problem caused by async behaviour.
-            # pool = PopenPoolExecutor(
-            #     max_workers=16,
-            #     timeout=None,
-            #     initializer=None,
-            # )
-
-            # # Dispatch the build inputs to the worker processes.
-            # for map_result in pool.map_with_error_catching(
-            #     lambda x: multiprocessing_helper(*x),
-            #     [
-            #         (
-            #             state.mod,
-            #             sch.trace.as_json(),
-            #             num_trials,
-            #             optimizer_logging,
-            #             postprocs,
-            #             state.context,
-            #             state.cost_model,
-            #             state.work_dir,
-            #             state.rand_state,
-            #         )
-            #         for sch in tune_schedules
-            #     ],
-            # ):
-            #     if map_result.status == StatusKind.COMPLETE:
-            #         trace_json = map_result.value
-            #         sch = Schedule(mod=state.mod,
-            #                        seed=state.rand_state,
-            #                        debug_mask=0,
-            #                        error_render_level="none",)
-            #         Trace.apply_json_to_schedule(trace_json, sch)
-            #         tuned_schedules.append(sch)
-            #     elif map_result.status == StatusKind.EXCEPTION:
-            #         print("LocalBuilder: An exception occurred\n" + str(map_result.value))
-            #     else:
-            #         raise ValueError("Unreachable: unexpected result: {map_result}")
-            # del pool
             with ProcessPoolExecutor(max_workers=16) as executor:
                 futures = [executor.submit(multiprocessing_helper,
                                            state.mod,
@@ -260,15 +230,21 @@ def call_bayopt_parallel(tune_schedules: List[Schedule], num_trials: int,
                                            state.rand_state)
                            for sch in tune_schedules]
 
-                for future in futures:
+                for future in as_completed(futures):
                     try:
-                        trace_json = future.result()
+                        trace_json, scores = future.result()
                         sch = Schedule(mod=state.mod,
                                        seed=state.rand_state,
                                        debug_mask=0,
                                        error_render_level="none",)
                         Trace.apply_json_to_schedule(trace_json, sch)
                         tuned_schedules.append(sch)
+                        if scores is not None and len(scores) == 3:
+                            logger(logging.DEBUG, __name__, current_line_number(),
+                                   f"Score: {scores[0]:.4f} ==> {scores[1]:.4f} ==> {scores[2]:.4f}")
+                        elif scores is not None:
+                            logger(logging.DEBUG, __name__, current_line_number(),
+                                   f"Score: {scores[0]:.4f} ==> {scores[1]:.4f}")
                     except Exception as e:
                         print(f'Task generated an exception: {e}')
         else:
@@ -327,7 +303,8 @@ def multiprocessing_helper(mod: IRModule, trace: Trace, num_trials: int, optimiz
                                 mod=mod,
                                 rand_state=rand_state)
 
-    return bay_opt_tuner.tune().trace.as_json()
+    sch, scores = bay_opt_tuner.tune()
+    return sch.trace.as_json(), scores
 
 
 class BayOptTuner:
@@ -370,14 +347,7 @@ class BayOptTuner:
         sch_phase_one, scores = self._tune_tiling_and_unrole(untuned_sch)
         sch_phase_two, scores = self._tune_parallel_annotation(sch_phase_one, scores)
 
-        if scores is not None and len(scores) == 3:
-            logger(logging.DEBUG, __name__, current_line_number(),
-                   f"Score: {scores[0]:.4f} ==> {scores[1]:.4f} ==> {scores[2]:.4f}")
-        elif scores is not None:
-            logger(logging.DEBUG, __name__, current_line_number(),
-                   f"Score: {scores[0]:.4f} ==> {scores[1]:.4f}")
-
-        return sch_phase_two
+        return sch_phase_two, scores
 
     def _tune_parallel_annotation(self, sch: Schedule, scores: List[int]) -> Union[Schedule, List[int]]:
         possible_decision_dict: Dict[Instruction, List[int]] = dict()
