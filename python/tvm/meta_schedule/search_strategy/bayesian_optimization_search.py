@@ -205,7 +205,7 @@ class TuningCandidate:
 
     def __init__(self, sch: Schedule, measured: bool) -> None:
         self.sch = sch
-        self.measured
+        self.measured = measured
 
     @staticmethod
     def get_schedules(candidates: List["TuningCandidate"]) -> List[Schedule]:
@@ -903,7 +903,7 @@ class TuningState:
             # XGB Cost Model is not yet accurate
             num_trials = 1
             optimizer_logging = False
-        elif 64 <= num_workload_db_entries and num_workload_db_entries < 256:
+        elif num_workload_db_entries < 256:
             num_trials = 20
             optimizer_logging = False
         else:
