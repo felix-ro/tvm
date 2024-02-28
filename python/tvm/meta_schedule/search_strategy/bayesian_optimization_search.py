@@ -12,7 +12,9 @@ from ..logging import get_logger, get_logging_func
 from ..profiler import Profiler
 
 from ..cost_model import CostModel
-from concurrent.futures import as_completed, ProcessPoolExecutor
+from ...contrib.popen_pool import PopenPoolExecutor, StatusKind
+
+# from concurrent.futures import as_completed, ProcessPoolExecutor
 
 if TYPE_CHECKING:
     from ..database import Database, TuningRecord
@@ -26,10 +28,10 @@ import operator
 import logging
 import inspect
 from itertools import permutations
-# from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 import hashlib
 import os
 import shutil
+
 
 from bayes_opt import BayesianOptimization, UtilityFunction
 from bayes_opt.logger import JSONLogger
@@ -297,34 +299,79 @@ def call_bayopt_parallel(tune_candidates: List[TuningCandidate], num_trials: int
     with Profiler.timeit("BayOptSearch/Tuner/Tune"):
         if threaded:
             state.cost_model.save(os.path.join(state.work_dir, "cost_model"))
-            with ProcessPoolExecutor(max_workers=16) as executor:
-                futures = [executor.submit(multiprocessing_helper,
-                                           state.mod,
-                                           candidate.sch.trace.as_json(),
-                                           candidate.measured,
-                                           num_trials,
-                                           optimizer_logging,
-                                           postprocs,
-                                           state.context,
-                                           state.cost_model,
-                                           state.work_dir,
-                                           state.rand_state)
-                           for candidate in tune_candidates]
+            # Here we restart the PopenPool everytime because of a known memory leak issue with the
+            # PopenPool workers after a couple times of usage. We don't apply the same to runners to
+            # avoid potential problem caused by async behaviour.
+            pool = PopenPoolExecutor(
+                max_workers=4,
+                timeout=None,
+                initializer=None,
+                maximum_process_uses=40
+            )
 
-                for future in as_completed(futures):
-                    try:
-                        trace_json, tuning_report = future.result()
-                        sch = Schedule(mod=state.mod,
-                                       seed=state.rand_state,
-                                       debug_mask=0,
-                                       error_render_level="none",)
-                        Trace.apply_json_to_schedule(trace_json, sch)
-                        tuned_schedules.append(sch)
-                        analyse_tuning_report(tuning_report=tuning_report,
-                                              tuning_summary=None)
-                        tuning_summary.enter_tuning_report(tuning_report)
-                    except Exception as e:
-                        print(f'Task generated an exception: {e}')
+            # Dispatch the build inputs to the worker processes.
+            for map_result in pool.map_with_error_catching(
+                lambda x: multiprocessing_helper(*x),
+                [
+                    (
+                        state.mod,
+                        candidate.sch.trace.as_json(),
+                        candidate.measured,
+                        num_trials,
+                        optimizer_logging,
+                        postprocs,
+                        state.context,
+                        state.cost_model,
+                        state.work_dir,
+                        state.rand_state,
+                    )
+                    for candidate in tune_candidates
+                ],
+            ):
+                if map_result.status == StatusKind.COMPLETE:
+                    trace_json, tuning_report = map_result.value
+                    sch = Schedule(mod=state.mod,
+                                   seed=state.rand_state,
+                                   debug_mask=0,
+                                   error_render_level="none",)
+                    Trace.apply_json_to_schedule(trace_json, sch)
+                    tuned_schedules.append(sch)
+                    analyse_tuning_report(tuning_report=tuning_report,
+                                          tuning_summary=None)
+                    tuning_summary.enter_tuning_report(tuning_report)
+                elif map_result.status == StatusKind.EXCEPTION:
+                    print("LocalBuilder: An exception occurred\n" + str(map_result.value))
+                else:
+                    raise ValueError("Unreachable: unexpected result: {map_result}")
+            del pool
+            # with ProcessPoolExecutor(max_workers=2) as executor:
+            #     futures = [executor.submit(multiprocessing_helper,
+            #                                state.mod,
+            #                                candidate.sch.trace.as_json(),
+            #                                candidate.measured,
+            #                                num_trials,
+            #                                optimizer_logging,
+            #                                postprocs,
+            #                                state.context,
+            #                                state.cost_model,
+            #                                state.work_dir,
+            #                                state.rand_state)
+            #                for candidate in tune_candidates]
+
+            #     for future in as_completed(futures):
+            #         try:
+            #             trace_json, tuning_report = future.result()
+            #             sch = Schedule(mod=state.mod,
+            #                            seed=state.rand_state,
+            #                            debug_mask=0,
+            #                            error_render_level="none",)
+            #             Trace.apply_json_to_schedule(trace_json, sch)
+            #             tuned_schedules.append(sch)
+            #             analyse_tuning_report(tuning_report=tuning_report,
+            #                                   tuning_summary=None)
+            #             tuning_summary.enter_tuning_report(tuning_report)
+            #         except Exception as e:
+            #             print(f'Task generated an exception: {e}')
         else:
             for candidate in tune_candidates:
                 tuned_schedule, tuning_report = thread_helper(state.mod,
@@ -908,7 +955,7 @@ class TuningState:
             optimizer_logging = False
         else:
             num_trials = 40
-            optimizer_logging = False and self.save_optimizer
+            optimizer_logging = self.save_optimizer
 
         num_sch_to_tuner = len(tune_candidates)
         logger(logging.INFO, __name__, current_line_number(),
