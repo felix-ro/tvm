@@ -254,14 +254,10 @@ class TuningSummary:
             self.num_tune_failures += 1
         elif tuning_report.optimizer_failure:
             self.num_optimizer_failures += 1
-        elif tuning_report.pre_tuning_score and tuning_report.phase_two_tuning_score:
-            self.improvements.append(tuning_report.phase_two_tuning_score - tuning_report.pre_tuning_score)
-            if tuning_report.phase_two_tuning_score > self.best_score:
-                self.best_score = tuning_report.phase_two_tuning_score
-        elif tuning_report.pre_tuning_score and tuning_report.phase_one_tuning_score:
-            self.improvements.append(tuning_report.phase_one_tuning_score - tuning_report.pre_tuning_score)
-            if tuning_report.phase_one_tuning_score > self.best_score:
-                self.best_score = tuning_report.phase_one_tuning_score
+        elif tuning_report.pre_tuning_score and tuning_report.last_tuning_score:
+            self.improvements.append(tuning_report.last_tuning_score - tuning_report.pre_tuning_score)
+            if tuning_report.last_tuning_score > self.best_score:
+                self.best_score = tuning_report.last_tuning_score
 
     def get_avg_improvement(self):
         if len(self.improvements) > 0:
