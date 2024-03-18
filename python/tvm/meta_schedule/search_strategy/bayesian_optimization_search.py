@@ -167,6 +167,18 @@ def process_database_trace(trace_id, per_thread_data, picked_traces, pp: "Thread
         raise ValueError(f"Could not post-process trace from database:\n{trace}")
 
 
+def get_num_unique_traces(schs: List[Schedule]):
+    trace_map = dict()
+
+    for sch in schs:
+        if str(sch.trace) in trace_map:
+            trace_map[str(sch.trace)] = +1
+        else:
+            trace_map[str(sch.trace)] = 1
+
+    return len(trace_map.keys())
+
+
 class ThreadedTraceApply:
     class Item:
         postproc = None
@@ -1008,6 +1020,10 @@ class TuningState:
         # Sample a new population of random schedules
         unmeasured_schedules: List[Schedule] = self._sample_initial_population(self.population_size)
 
+        # Gives some insight if the random generation is working as intended
+        logger(logging.INFO, __name__, current_line_number(),
+               f"Sampling included {get_num_unique_traces(unmeasured_schedules)} unique schedule(s)")
+
         # Check if minimum amount of schedules were sampled
         if (len(unmeasured_schedules) < self.init_min_unmeasured):
             raise ValueError  # Specify a better error here
@@ -1116,9 +1132,9 @@ class TuningState:
                         found_new = True
                         output_schedules.append(results[i])
                 fail_count += not found_new
-                logger(logging.INFO, __name__, current_line_number(),
-                       f"Sampled {len(output_schedules)} new random schedules")
-                return output_schedules
+            logger(logging.INFO, __name__, current_line_number(),
+                   f"Sampled {len(output_schedules)} new random schedules")
+            return output_schedules
 
     def notify_runner_results(self, measure_candidates: List[MeasureCandidate], results: List[RunnerResult]):
         self.st += len(results)
