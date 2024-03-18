@@ -899,6 +899,7 @@ class TuningState:
         self.st: int = 0
         self.ed: int = num_trials_per_iter
         self.max_fail_count: int = 300
+        self.bypass_tuning: bool = False
 
         self.per_thread_data_ = [PerThreadData() for i in range(self.context.num_threads)]
         for i in range(self.context.num_threads):
@@ -968,10 +969,26 @@ class TuningState:
                    f"Epsilon Greedy mixed {len(mixed_list)} random schedules into runner set")
         return mixed_list
 
+    def _detect_single_sample_operation(self):
+        sample_instructions = ["SampleComputeLocation", "SampleCategorical", "SamplePerfectTile"]
+        tunable = False
+
+        for i in range(len(self.design_spaces)):
+            for inst in self.design_spaces[i].insts:
+                if inst.kind.name in sample_instructions:
+                    tunable = True
+
+        if not tunable:
+            self.num_trials_per_iter = 1
+            self.bypass_tuning = True
+
     def generate_measure_candidates(self) -> Optional[List[MeasureCandidate]]:
         # Check if there are any trials left
         if (self.st >= self.max_trials):
             return None
+
+        # Some operators have no tunable instructions, so we only need a single sample
+        self._detect_single_sample_operation()
 
         # Check if next batch would go above max trial limit and adjust down
         sample_num = self.num_trials_per_iter
@@ -1018,14 +1035,26 @@ class TuningState:
                                                                          num=sample_num - len(random_candidates),
                                                                          fill_missing=True)
 
-        tuned_schedules: List[Schedule] = self._send_to_bayesian_tuner(tune_candidates)
-
-        run_schedules = TuningCandidate.get_schedules(random_candidates) + tuned_schedules
+        # Sometimes it can make sense to bypass the tuner and prepare the sampled schedules for running immediatley
+        # Possible reasons include: trace (design space) has no sample instructions, or first round bypass
+        if not self.bypass_tuning:
+            tuned_schedules: List[Schedule] = self._send_to_bayesian_tuner(tune_candidates)
+            run_schedules = TuningCandidate.get_schedules(random_candidates) + tuned_schedules
+        else:
+            run_schedules = TuningCandidate.get_schedules(random_candidates) + \
+                            TuningCandidate.get_schedules(tune_candidates)
 
         assert len(run_schedules) == sample_num
         return assemble_candidates(run_schedules)
 
-    def _get_num_workload_entries(self):
+    def _get_num_workload_entries(self) -> int:
+        """Retrieve the number of database entries for a given workload
+
+        Returns
+        ----------
+        num: int
+            The number of entries
+        """
         return len(self.database.get_top_k(self.workload, 256))
 
     def _send_to_bayesian_tuner(self, tune_candidates: List[TuningCandidate]) -> List[Schedule]:
