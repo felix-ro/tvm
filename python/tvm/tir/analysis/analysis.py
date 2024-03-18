@@ -21,9 +21,9 @@ from typing import Dict, List, Optional, Union
 import tvm
 from tvm import Object
 from tvm.ir import IRModule
-from tvm.tir.expr import Var
+from tvm.tir.expr import Var, IntImm
 from tvm.tir.stmt import Block, BufferRegion, PrimExpr
-from tvm.tir.schedule import Instruction, Schedule, Trace
+from tvm.tir.schedule import Instruction, Schedule, Trace, BlockRV
 
 from .. import Buffer, Stmt
 from ..function import PrimFunc
@@ -465,3 +465,22 @@ def get_possible_parallel_annotate_decisions(sch: Schedule, trace: Trace, rand_s
         The possible annotation values
     """
     return list(_ffi_api.get_possible_parallel_annotate_decisions(sch, trace, rand_state, inst, max_parallel_extent))
+
+
+def collect_compute_location_indices(sch: Schedule, block: BlockRV) -> List[IntImm]:
+    """Collect all the feasible compute-at location incdices of the input block
+
+    Parameters
+    ----------
+    sch: tvm.tir.Schedule
+        The schedule the block belongs to
+
+    block: tvm.tir.BlockRV
+        The block whose compute-at locations are to be collected
+
+    Returns
+    -------
+    All the feasible compute-at locations of the input block, given as a list of their indices
+    among the outer loops of the input block.
+    """
+    return list(_ffi_api.collect_compute_location_indices(sch, block))

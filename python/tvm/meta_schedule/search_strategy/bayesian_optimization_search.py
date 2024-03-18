@@ -1,8 +1,11 @@
 from typing import TYPE_CHECKING, List, Optional, Any, Dict, Union
-from tvm.tir.schedule import Schedule, Trace, Instruction
-from tvm.tir.analysis import is_annotate_with_parallel, get_possible_parallel_annotate_decisions
+from tvm.tir.schedule import Schedule, Trace, Instruction, BlockRV
+from tvm.tir.analysis import (is_annotate_with_parallel,
+                              get_possible_parallel_annotate_decisions,
+                              collect_compute_location_indices)
 from tvm.ir import IRModule, make_node
 from tvm.runtime import String
+from tvm.tir import IntImm
 
 from .search_strategy import PySearchStrategy, MeasureCandidate, SearchStrategy
 from ..utils import derived_object, cpu_count
@@ -80,13 +83,13 @@ def sample_int(rand_state: np.int64, min_inclusive: int, max_exclusive: int):
 
 
 def get_top_k_schedules(context: "TuneContext", cost_model: CostModel,
-                        schedules: List[Schedule], k: int) -> Union[List[Schedule] | List[int]]:
+                        schedules: List[Schedule], k: int) -> Union[List[Schedule] | List[float]]:
     with Profiler.timeit("BayOptSearch/GenerateCandidates/GetTopKSchedules"):
         scores = predict_normalized_scores(schedules, context, cost_model)
         idx = np.argsort(scores)[-k:][::-1]
 
         top_schedules: List[Schedule] = []
-        top_scores: List[int] = []
+        top_scores: List[float] = []
         for index in idx:
             top_schedules.append(schedules[index])
             top_scores.append(scores[index])
@@ -216,13 +219,28 @@ class TuningCandidate:
 
 class TuningReport:
     pre_tuning_score: float = None
+    last_tuning_score: float = None
     phase_one_tuning_score: float = None
     phase_two_tuning_score: float = None
+    phase_three_tuning_score: float = None
 
     discarded_tune_schedule: bool = False
     tune_failure: bool = False
     optimizer_failure: bool = False
     num_tuneable_insts: int = None
+
+    def create_tuning_result_message(self) -> String:
+        message = ""
+
+        if self.pre_tuning_score:
+            message = f"{self.pre_tuning_score:.4f} "
+
+        for score in [self.phase_one_tuning_score, self.phase_two_tuning_score, self.phase_three_tuning_score]:
+            if not score:
+                message += "==> discarded "
+            else:
+                message += f"==> {score:.4f} "
+        return message
 
 
 class TuningSummary:
@@ -277,18 +295,9 @@ def analyse_tuning_report(tuning_report: TuningReport, tuning_summary: TuningSum
     elif tuning_report.optimizer_failure:
         logger(logging.ERROR, __name__, current_line_number(),
                "Optimizer failed to predict next decision")
-    elif tuning_report.discarded_tune_schedule and tuning_report.pre_tuning_score:
-        logger(logging.DEBUG, __name__, current_line_number(),
-               f"Score: {tuning_report.pre_tuning_score:.4f} discarded tuning schedule, measuring random instead")
-    elif (tuning_report.pre_tuning_score and tuning_report.phase_two_tuning_score
-          and tuning_report.phase_one_tuning_score):
-        logger(logging.DEBUG, __name__, current_line_number(),
-               f"Score: {tuning_report.pre_tuning_score:.4f} ==> " +
-               f"{tuning_report.phase_one_tuning_score:.4f} ==> " +
-               f"{tuning_report.phase_two_tuning_score:.4f}")
     else:
-        logger(logging.DEBUG, __name__, current_line_number(),
-               f"Score: {tuning_report.pre_tuning_score:.4f} ==> {tuning_report.phase_one_tuning_score:.4f}")
+        message = tuning_report.create_tuning_result_message()
+        logger(logging.DEBUG, __name__, current_line_number(), message)
 
 
 def call_bayopt_parallel(tune_candidates: List[TuningCandidate], num_trials: int,
@@ -438,6 +447,16 @@ def multiprocessing_helper(mod: IRModule, trace: Trace, measured: bool, num_tria
     return sch.trace.as_json(), tuning_report
 
 
+def get_compute_location_insts(sch: Schedule) -> List[Instruction]:
+    compute_location_insts = []
+
+    for inst in sch.trace.insts:
+        if inst.kind.name == "SampleComputeLocation":
+            compute_location_insts.append(inst)
+
+    return compute_location_insts
+
+
 class BayOptTuner:
     def __init__(self,
                  schedule: Schedule,
@@ -477,8 +496,77 @@ class BayOptTuner:
     def tune(self) -> Union[Schedule | TuningReport]:
         sch_phase_one: Schedule = self._tune_tiling_and_unrole(self.schedule)
         sch_phase_two: Schedule = self._tune_parallel_annotation(sch_phase_one)
+        sch_phase_three: Schedule = self._tune_compute_location(sch_phase_two)
 
-        return sch_phase_two, self.tuning_report
+        return sch_phase_three, self.tuning_report
+
+    def _tune_compute_location(self, sch: Schedule):
+        MAX_CANDIDATES = 64
+
+        # 1. Get all compute location insts
+        compute_location_insts = get_compute_location_insts(sch)
+
+        # 2. Return if no SampleComputeLocation instructions found
+        if len(compute_location_insts) == 0:
+            return sch
+
+        # 3. Randomly set an order in which we will work through them
+        shuffled_indices = [i for i in range(len(compute_location_insts))]
+        random.shuffle(shuffled_indices)
+
+        # 4. Create the first candidates
+        first_inst_index = shuffled_indices[0]
+        shuffled_indices.pop(0)
+        candidates: List[Schedule] = self._get_all_mutations_for_compute_location_insts(sch, first_inst_index)
+
+        # 5. Get all or maximum number of combinations in the shuffled order
+        for index in shuffled_indices:
+            new_candidates = []
+            for candidate in candidates:
+                new_candidates.extend(self._get_all_mutations_for_compute_location_insts(candidate, index))
+                if (len(candidates) + len(new_candidates)) >= MAX_CANDIDATES:
+                    break
+            candidates.extend(new_candidates)
+            if len(candidates) >= MAX_CANDIDATES:
+                break
+
+        # 6. Select the best schedule based on cost model
+        if len(candidates) == 0:
+            return sch
+        else:
+            # Get the top schedule and score (returned in lists, be careful)
+            top_schs, top_scores = get_top_k_schedules(self.context, self.cost_model, candidates, 0)
+
+            if top_scores[0] <= self.tuning_report.last_tuning_score:
+                # If best score worse than before this phase return old schedule
+                return sch
+            else:
+                self.tuning_report.phase_three_tuning_score = top_scores[0]
+                self.tuning_report.last_tuning_score = top_scores[0]
+                return top_schs[0]
+
+    def _get_all_mutations_for_compute_location_insts(self, sch: Schedule,
+                                                      inst_index: int) -> List[Schedule]:
+        candidates: List[Schedule] = []
+        current_index: int = 0
+
+        for inst in sch.trace.insts:
+            if current_index == inst_index and inst.kind.name == "SampleComputeLocation":
+                block: BlockRV = inst.inputs[0]
+                try:
+                    locations: List[IntImm] = collect_compute_location_indices(sch, block)
+                    for loc in locations:
+                        applied_sch = self._apply_decisions(sch, {inst: loc})
+                        if applied_sch is not None:
+                            candidates.append(applied_sch)
+                        else:
+                            self.tuning_report.tune_failure = True
+                except Exception:
+                    continue
+            elif inst.kind.name == "SampleComputeLocation":
+                current_index += 1
+
+        return candidates
 
     def _tune_parallel_annotation(self, sch: Schedule) -> Schedule:
         possible_decision_dict: Dict[Instruction, List[int]] = dict()
@@ -514,15 +602,17 @@ class BayOptTuner:
         bests, top_scores = get_top_k_schedules(self.context, self.cost_model, schedules, 1)
 
         # if top score worse than phase one score, return phase one schedule
-        if top_scores[0] <= self.tuning_report.phase_one_tuning_score:
+        if top_scores[0] <= self.tuning_report.last_tuning_score:
             return sch
         else:
             self.tuning_report.phase_two_tuning_score = top_scores[0]
+            self.tuning_report.last_tuning_score = top_scores[0]
             return bests[0]
 
     def _tune_tiling_and_unrole(self, untuned_sch: Schedule) -> Schedule:
         pre_tuning_score = self._predict_normalized_score(untuned_sch)
         self.tuning_report.pre_tuning_score = pre_tuning_score
+        self.tuning_report.last_tuning_score = pre_tuning_score
         pbounds = self._get_parameters(untuned_sch=untuned_sch)
 
         # Check the number of tuneable instructions
@@ -578,15 +668,16 @@ class BayOptTuner:
 
             current_trial += 1
 
-        # Save the tuning score
-        self.tuning_report.phase_one_tuning_score = max_target
-
         # If the original schedule was never measured (random schedule), and tuning did not improve
         # its score we return the original schedule. However, if we have already measured the schedule
         # (database schedule) then we will measure the worse one instead of measuring the same one twice
         if max_target <= pre_tuning_score and not self.measured:
             self.tuning_report.discarded_tune_schedule = True
             return untuned_sch
+
+        # Save the tuning score
+        self.tuning_report.phase_one_tuning_score = max_target
+        self.tuning_report.last_tuning_score = max_target
 
         # Construct Schedule from best decisions found with BayOpt in this tuning run (not overall)
         tuned_sch: Schedule = self._get_schedule_with_predicted_decisons(untuned_sch, max_decisions)
