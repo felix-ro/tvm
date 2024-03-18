@@ -320,7 +320,7 @@ def call_bayopt_parallel(tune_candidates: List[TuningCandidate], num_trials: int
             # PopenPool workers after a couple times of usage. We don't apply the same to runners to
             # avoid potential problem caused by async behaviour.
             pool = PopenPoolExecutor(
-                max_workers=4,
+                max_workers=16,
                 timeout=None,
                 initializer=None,
                 maximum_process_uses=40
@@ -1022,8 +1022,9 @@ class TuningState:
         # The XGB cost model will give random predictions if the workload does not have
         # atleast 64 hardware measurement results. Therefore, it can be time efficient to
         # bypass the tuning stage on the first iter of each workload.
+        first_iter_bypass: bool = False
         if num_workload_db_entries < 64 and self.full_first_round_bypass:
-            self.bypass_tuning = True
+            first_iter_bypass = True
             logger(logging.INFO, __name__, current_line_number(),
                    "Bypassing BO Tuner, since XGB cost model is not accurate yet")
 
@@ -1063,12 +1064,12 @@ class TuningState:
 
         # Sometimes it can make sense to bypass the tuner and prepare the sampled schedules for running immediatley
         # Possible reasons include: trace (design space) has no sample instructions, or first round bypass
-        if not self.bypass_tuning:
-            tuned_schedules: List[Schedule] = self._send_to_bayesian_tuner(tune_candidates)
-            run_schedules = TuningCandidate.get_schedules(random_candidates) + tuned_schedules
-        else:
+        if self.bypass_tuning or first_iter_bypass:
             run_schedules = TuningCandidate.get_schedules(random_candidates) + \
                             TuningCandidate.get_schedules(tune_candidates)
+        else:
+            tuned_schedules: List[Schedule] = self._send_to_bayesian_tuner(tune_candidates)
+            run_schedules = TuningCandidate.get_schedules(random_candidates) + tuned_schedules
 
         assert len(run_schedules) == sample_num
         return assemble_candidates(run_schedules)
@@ -1160,7 +1161,7 @@ class BayesianOptimizationSearch(PySearchStrategy):
     init_measured_ratio = 0.1
     init_min_unmeasured = 50
     max_fail_count = 50
-    threaded: bool = False
+    threaded: bool = True
     save_optimizer: bool = True
     full_first_round_bypass: bool = True
 
