@@ -884,7 +884,8 @@ class TuningState:
                  init_min_unmeasured,
                  save_optimizer,
                  max_fail_count,
-                 threaded
+                 threaded,
+                 full_first_round_bypass,
                  ):
         self.max_trials = max_trials
         self.num_trials_per_iter = num_trials_per_iter
@@ -898,6 +899,7 @@ class TuningState:
         self.save_optimizer = save_optimizer
         self.max_fail_count = max_fail_count
         self.threaded = threaded
+        self.full_first_round_bypass: bool = full_first_round_bypass
 
         self.context: TuneContext = context
         self.mod: IRModule = context.mod
@@ -1016,6 +1018,14 @@ class TuningState:
             # Top measured database schedules
             num_measured_schedules = int(32)
             measured_schedules = self._pick_best_from_database(num_measured_schedules)
+
+        # The XGB cost model will give random predictions if the workload does not have
+        # atleast 64 hardware measurement results. Therefore, it can be time efficient to
+        # bypass the tuning stage on the first iter of each workload.
+        if num_workload_db_entries < 64 and self.full_first_round_bypass:
+            self.bypass_tuning = True
+            logger(logging.INFO, __name__, current_line_number(),
+                   "Bypassing BO Tuner, since XGB cost model is not accurate yet")
 
         # Sample a new population of random schedules
         unmeasured_schedules: List[Schedule] = self._sample_initial_population(self.population_size)
@@ -1152,6 +1162,7 @@ class BayesianOptimizationSearch(PySearchStrategy):
     max_fail_count = 50
     threaded: bool = False
     save_optimizer: bool = True
+    full_first_round_bypass: bool = True
 
     def _initialize_with_tune_context(self, context: "TuneContext") -> None:
         """Initialize the search strategy with tuning context.
@@ -1206,7 +1217,8 @@ class BayesianOptimizationSearch(PySearchStrategy):
                                  init_min_unmeasured=self.init_min_unmeasured,
                                  save_optimizer=self.save_optimizer,
                                  max_fail_count=self.max_fail_count,
-                                 threaded=self.threaded)
+                                 threaded=self.threaded,
+                                 full_first_round_bypass=self.full_first_round_bypass)
 
     def post_tuning(self) -> None:
         """Post-tuning for the search strategy."""
