@@ -241,7 +241,7 @@ std::vector<double> PredictNormalizedScore(const std::vector<Schedule>& candidat
 
 /**************** Evolutionary Search ****************/
 
-/*!\brief A search strategy that generates measure candidates using evolutionary search. */
+/*! \brief A search strategy that generates measure candidates using evolutionary search. */
 class EvolutionarySearchNode : public SearchStrategyNode {
  public:
   /*! \brief The state of the search strategy. */
