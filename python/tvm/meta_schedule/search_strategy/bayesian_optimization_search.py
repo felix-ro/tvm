@@ -241,6 +241,7 @@ class TuningReport:
     tune_failure: bool = False
     optimizer_failure: bool = False
     num_tuneable_insts: int = None
+    num_duplicate_points_skipped: int = 0
 
     def create_tuning_result_message(self) -> String:
         message = ""
@@ -261,6 +262,7 @@ class TuningSummary:
     best_score: float = 0.0
     num_tune_failures: int = 0
     num_optimizer_failures: int = 0
+    num_duplicate_points_skipped = 0
 
     def enter_tuning_report(self, tuning_report: TuningReport):
         if tuning_report.tune_failure:
@@ -271,6 +273,8 @@ class TuningSummary:
             self.improvements.append(tuning_report.last_tuning_score - tuning_report.pre_tuning_score)
             if tuning_report.last_tuning_score > self.best_score:
                 self.best_score = tuning_report.last_tuning_score
+
+        self.num_duplicate_points_skipped += tuning_report.num_duplicate_points_skipped
 
     def get_avg_improvement(self):
         if len(self.improvements) > 0:
@@ -287,6 +291,8 @@ class TuningSummary:
                f"Tuner: Number of Tune Failures {self.num_tune_failures}")
         logger(logging.INFO, __name__, current_line_number(),
                f"Tuner: Number of Optimizer Failures {self.num_optimizer_failures}")
+        logger(logging.INFO, __name__, current_line_number(),
+               f"Tuner: Number of Duplicate Points Skipped {self.num_duplicate_points_skipped}")
 
 
 def analyse_tuning_report(tuning_report: TuningReport, tuning_summary: TuningSummary):
@@ -705,14 +711,17 @@ class BayOptTuner:
             # Get the a list of decisions for the entered pbounds
             new_decision = False
             next_decisions = None
-            while not new_decision:
-                # POTENTIAL FOR INFINITE LOOP SET A MAX BOUND
+            iteration = 0
+            while not new_decision and iteration < 50:
+                iteration += 1
                 next_decisions: dict = optimizer.suggest(utility)
                 points_to_probe = list(next_decisions.values())
                 discrete_points = str([int(x) for x in points_to_probe])
                 if discrete_points not in discrete_points_registered:
                     new_decision = True
                     discrete_points_registered[discrete_points] = None
+                else:
+                    self.tuning_report.num_duplicate_points_skipped += 1
 
             if next_decisions is None:
                 self.tuning_report.optimizer_failure = True
