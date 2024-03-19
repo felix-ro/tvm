@@ -341,6 +341,7 @@ def call_bayopt_parallel(tune_candidates: List[TuningCandidate], num_trials: int
                         state.cost_model,
                         state.work_dir,
                         state.rand_state,
+                        state.validate_schedules,
                     )
                     for candidate in tune_candidates
                 ],
@@ -399,7 +400,8 @@ def call_bayopt_parallel(tune_candidates: List[TuningCandidate], num_trials: int
                                                               state.context,
                                                               state.cost_model,
                                                               state.work_dir,
-                                                              state.rand_state)
+                                                              state.rand_state,
+                                                              state.validate_schedules)
                 tuned_schedules.append(tuned_schedule)
                 analyse_tuning_report(tuning_report=tuning_report,
                                       tuning_summary=None)
@@ -409,12 +411,13 @@ def call_bayopt_parallel(tune_candidates: List[TuningCandidate], num_trials: int
     return tuned_schedules
 
 
-def thread_helper(mod: IRModule, candidate: TuningCandidate, num_trials: int, optimizer_logging: bool, postprocs,
-                  context: "TuneContext", cost_model: "CostModel", work_dir: str, rand_state: np.int64):
+def thread_helper(mod: IRModule, candidate: TuningCandidate, num_trials: int, optimizer_logging: bool,
+                  postprocs, context: "TuneContext", cost_model: "CostModel", work_dir: str,
+                  rand_state: np.int64, validate_schedules: bool):
 
     bay_opt_tuner = BayOptTuner(schedule=candidate.sch,
                                 measured=candidate.measured,
-                                validate_schedules=True,
+                                validate_schedules=validate_schedules,
                                 max_trials=num_trials,
                                 optimizer_logging=optimizer_logging,
                                 postprocs=postprocs,
@@ -429,7 +432,7 @@ def thread_helper(mod: IRModule, candidate: TuningCandidate, num_trials: int, op
 
 def multiprocessing_helper(mod: IRModule, trace: Trace, measured: bool, num_trials: int, optimizer_logging: bool,
                            postprocs, context: "TuneContext", cost_model: "CostModel", work_dir: str,
-                           rand_state: np.int64):
+                           rand_state: np.int64, validate_schedules: bool):
 
     sch = Schedule(mod=mod,
                    seed=rand_state,
@@ -441,7 +444,7 @@ def multiprocessing_helper(mod: IRModule, trace: Trace, measured: bool, num_tria
 
     bay_opt_tuner = BayOptTuner(schedule=sch,
                                 measured=measured,
-                                validate_schedules=True,
+                                validate_schedules=validate_schedules,
                                 max_trials=num_trials,
                                 optimizer_logging=optimizer_logging,
                                 postprocs=postprocs,
@@ -617,6 +620,42 @@ class BayOptTuner:
             self.tuning_report.last_tuning_score = top_scores[0]
             return bests[0]
 
+    def _get_decisions(self, sch: Schedule) -> dict:
+        """Retrieves the decision dictionary that identifies the trace and
+        can be registered with optimizer
+
+        Parameters
+        ----------
+        sch: tvm.tir.Schedule
+            The schedule of which to generate a decision dict
+
+        Returns
+        -------
+        decision_dict: dict
+            The dictionary containing the decisions or indeces
+        """
+        input_decisions = dict()
+
+        for inst, decision in sch.trace.decisions.items():
+            if inst.kind.name == "SamplePerfectTile":
+                # 1. Get the unique tag of the instruction
+                inst_dec_tag: str = self._get_parameter_name(inst, decision)
+                # 2. Get the key corresponding to all instructions with the same possible decision
+                decision_key = self.instruction_decsion_map[inst_dec_tag]
+                # 3. Get all possible decisions
+                possible_decisions = decision_lookup[decision_key]
+                # 4. Get the index of the input decision
+                decision_index = possible_decisions.index(tuple(decision))
+                # 5. Add index to input decision dictionary
+                input_decisions[inst_dec_tag] = float(decision_index)
+            elif inst.kind.name == "SampleCategorical":
+                # 1. Get the unique tag of the instruction
+                inst_dec_tag: str = self._get_parameter_name(inst, decision)
+                # 2. The decison is already the required index, so add to dict
+                input_decisions[inst_dec_tag] = float(int(decision))
+
+        return input_decisions
+
     def _tune_tiling_and_unrole(self, untuned_sch: Schedule) -> Schedule:
         pre_tuning_score = self._predict_normalized_score(untuned_sch)
         self.tuning_report.pre_tuning_score = pre_tuning_score
@@ -637,10 +676,21 @@ class BayOptTuner:
         )
 
         optimizer = self._configure_optimizer_logging(untuned_sch=untuned_sch, optimizer=optimizer)
-        utility = UtilityFunction(kind="ucb", kappa=5, xi=0.0)
+        utility = UtilityFunction(kind="ucb", kappa=5)
+
+        # Since our input into tuning are schedules with high scores we want to
+        # register their decisions with the optimizer, so that it knows about a
+        # good result in the beginning.
+        input_decisions = self._get_decisions(sch=untuned_sch)
+        optimizer.register(params=input_decisions, target=pre_tuning_score)
+
+        if self.validate_schedules:
+            # Validate that recreated trace is identical to input trace
+            copy_sch = self._get_schedule_with_predicted_decisons(untuned_sch, input_decisions)
+            assert str(untuned_sch.trace) == str(copy_sch.trace)
 
         max_target: float = 0.0
-        max_decisions: Dict = None
+        max_decisions: dict = None
 
         current_trial: int = 0
         while (current_trial < self.max_trials):
@@ -886,6 +936,7 @@ class TuningState:
                  max_fail_count,
                  threaded,
                  full_first_round_bypass,
+                 validate_schedules,
                  ):
         self.max_trials = max_trials
         self.num_trials_per_iter = num_trials_per_iter
@@ -900,6 +951,7 @@ class TuningState:
         self.max_fail_count = max_fail_count
         self.threaded = threaded
         self.full_first_round_bypass: bool = full_first_round_bypass
+        self.validate_schedules: bool = validate_schedules
 
         self.context: TuneContext = context
         self.mod: IRModule = context.mod
@@ -1157,13 +1209,14 @@ class BayesianOptimizationSearch(PySearchStrategy):
     context: "TuneContext" = None
     state: TuningState = None
 
-    population_size = 1024
+    population_size = 1024  # The number of random schedules sampled
     init_measured_ratio = 0.1
     init_min_unmeasured = 50
     max_fail_count = 50
-    threaded: bool = True
-    save_optimizer: bool = True
-    full_first_round_bypass: bool = True
+    threaded: bool = True  # Currently using multiprocessing; performance questionable (high contention somewhere)
+    save_optimizer: bool = True  # Enables optimizer saving; can be overwritten by optimizer phases
+    full_first_round_bypass: bool = True  # Do not tune the first 64 schedules for each workload
+    validate_schedules: bool = False  # Use this for debugging; set False for benchmark runs
 
     def _initialize_with_tune_context(self, context: "TuneContext") -> None:
         """Initialize the search strategy with tuning context.
@@ -1219,7 +1272,8 @@ class BayesianOptimizationSearch(PySearchStrategy):
                                  save_optimizer=self.save_optimizer,
                                  max_fail_count=self.max_fail_count,
                                  threaded=self.threaded,
-                                 full_first_round_bypass=self.full_first_round_bypass)
+                                 full_first_round_bypass=self.full_first_round_bypass,
+                                 validate_schedules=self.validate_schedules)
 
     def post_tuning(self) -> None:
         """Post-tuning for the search strategy."""
