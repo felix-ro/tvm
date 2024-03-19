@@ -34,12 +34,13 @@ from itertools import permutations
 import hashlib
 import os
 import shutil
+import json
 
 
 from bayes_opt import BayesianOptimization, UtilityFunction
 from bayes_opt.logger import JSONLogger
 from bayes_opt.event import Events
-from bayes_opt.util import load_logs
+from bayes_opt.util import load_logs, NotUniqueError
 
 
 DECISION_TYPE = Any
@@ -672,17 +673,24 @@ class BayOptTuner:
             pbounds=pbounds,
             verbose=2,
             random_state=forkseed(self.rand_state),
-            allow_duplicate_points=True
+            allow_duplicate_points=False
         )
 
-        optimizer = self._configure_optimizer_logging(untuned_sch=untuned_sch, optimizer=optimizer)
-        utility = UtilityFunction(kind="ucb", kappa=10)
+        discrete_points_registered = dict()
+        optimizer = self._configure_optimizer_logging(untuned_sch=untuned_sch, optimizer=optimizer,
+                                                      discrete_points_registered=discrete_points_registered)
+        utility = UtilityFunction(kind="ucb", kappa=5)
 
         # Since our input into tuning are schedules with high scores we want to
         # register their decisions with the optimizer, so that it knows about a
         # good result in the beginning.
         input_decisions = self._get_decisions(sch=untuned_sch)
-        optimizer.register(params=input_decisions, target=pre_tuning_score)
+        try:
+            optimizer.register(params=input_decisions, target=pre_tuning_score)
+            discrete_points_registered[str(list(input_decisions.values()))] = None
+        except NotUniqueError:
+            logger(logging.DEBUG, __name__, current_line_number(),
+                   "Duplicate point during optimizer initialization (database schedule)")
 
         if self.validate_schedules:
             # Validate that recreated trace is identical to input trace
@@ -695,7 +703,16 @@ class BayOptTuner:
         current_trial: int = 0
         while (current_trial < self.max_trials):
             # Get the a list of decisions for the entered pbounds
-            next_decisions: dict = optimizer.suggest(utility)
+            new_decision = False
+            next_decisions = None
+            while not new_decision:
+                # POTENTIAL FOR INFINITE LOOP SET A MAX BOUND
+                next_decisions: dict = optimizer.suggest(utility)
+                points_to_probe = list(next_decisions.values())
+                discrete_points = str([int(x) for x in points_to_probe])
+                if discrete_points not in discrete_points_registered:
+                    new_decision = True
+                    discrete_points_registered[discrete_points] = None
 
             if next_decisions is None:
                 self.tuning_report.optimizer_failure = True
@@ -808,8 +825,20 @@ class BayOptTuner:
 
                 shutil.copy(pre_tuning_file_path, file_path)
 
+    @staticmethod
+    def register_points(discrete_points_registered: dict, file_path: str):
+        with open(file_path, 'r') as file:
+            for line in file:
+                # Parse the JSON line
+                json_data = json.loads(line)
+                decisions = json_data['params']
+                points_to_probe = list(decisions.values())
+                discrete_points = str([int(x) for x in points_to_probe])
+                discrete_points_registered[discrete_points] = None
+
     def _configure_optimizer_logging(self, untuned_sch: Schedule,
-                                     optimizer: BayesianOptimization) -> BayesianOptimization:
+                                     optimizer: BayesianOptimization,
+                                     discrete_points_registered: dict) -> BayesianOptimization:
         if not self.optimizer_logging:
             return optimizer
         else:
@@ -821,6 +850,7 @@ class BayOptTuner:
             # if file exists load
             if os.path.exists(file_path):
                 load_logs(optimizer, logs=file_path)
+                BayOptTuner.register_points(discrete_points_registered, file_path)
 
             # turn logging on again, set reset accordingly
             logger = JSONLogger(path=file_path, reset=False)
@@ -1083,9 +1113,10 @@ class TuningState:
         # Sample a new population of random schedules
         unmeasured_schedules: List[Schedule] = self._sample_initial_population(self.population_size)
 
-        # Gives some insight if the random generation is working as intended
-        logger(logging.INFO, __name__, current_line_number(),
-               f"Sampling included {get_num_unique_traces(unmeasured_schedules)} unique schedule(s)")
+        if self.validate_schedules:
+            # Gives some insight if the random generation is working as intended
+            logger(logging.INFO, __name__, current_line_number(),
+                   f"Sampling included {get_num_unique_traces(unmeasured_schedules)} unique schedule(s)")
 
         # Check if minimum amount of schedules were sampled
         if (len(unmeasured_schedules) < self.init_min_unmeasured):
