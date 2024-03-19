@@ -913,7 +913,7 @@ class TuningState:
         self.st: int = 0
         self.ed: int = num_trials_per_iter
         self.max_fail_count: int = 300
-        self.bypass_tuning: bool = False
+        self.bypass_tuning_no_sample_inst: bool = False
 
         self.per_thread_data_ = [PerThreadData() for i in range(self.context.num_threads)]
         for i in range(self.context.num_threads):
@@ -994,7 +994,7 @@ class TuningState:
 
         if not tunable:
             self.num_trials_per_iter = 1
-            self.bypass_tuning = True
+            self.bypass_tuning_no_sample_inst = True
 
     def generate_measure_candidates(self) -> Optional[List[MeasureCandidate]]:
         # Check if there are any trials left
@@ -1064,7 +1064,7 @@ class TuningState:
 
         # Sometimes it can make sense to bypass the tuner and prepare the sampled schedules for running immediatley
         # Possible reasons include: trace (design space) has no sample instructions, or first round bypass
-        if self.bypass_tuning or first_iter_bypass:
+        if self.bypass_tuning_no_sample_inst or first_iter_bypass:
             run_schedules = TuningCandidate.get_schedules(random_candidates) + \
                             TuningCandidate.get_schedules(tune_candidates)
         else:
