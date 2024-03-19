@@ -320,7 +320,7 @@ def call_bayopt_parallel(tune_candidates: List[TuningCandidate], num_trials: int
             # PopenPool workers after a couple times of usage. We don't apply the same to runners to
             # avoid potential problem caused by async behaviour.
             pool = PopenPoolExecutor(
-                max_workers=16,
+                max_workers=state.context.num_threads,
                 timeout=None,
                 initializer=None,
                 maximum_process_uses=40
@@ -676,7 +676,7 @@ class BayOptTuner:
         )
 
         optimizer = self._configure_optimizer_logging(untuned_sch=untuned_sch, optimizer=optimizer)
-        utility = UtilityFunction(kind="ucb", kappa=5)
+        utility = UtilityFunction(kind="ucb", kappa=10)
 
         # Since our input into tuning are schedules with high scores we want to
         # register their decisions with the optimizer, so that it knows about a
@@ -1229,6 +1229,9 @@ class BayesianOptimizationSearch(PySearchStrategy):
         self.context: TuneContext = context
         self.postprocs = context.space_generator.postprocs
         self.rand_state = forkseed(context.rand_state)
+
+        if self.context.num_threads == 1:
+            self.threaded = False
 
     def pre_tuning(
         self,
