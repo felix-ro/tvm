@@ -369,34 +369,6 @@ def call_bayopt_parallel(tune_candidates: List[TuningCandidate], num_trials: int
                 else:
                     raise ValueError("Unreachable: unexpected result: {map_result}")
             del pool
-            # with ProcessPoolExecutor(max_workers=2) as executor:
-            #     futures = [executor.submit(multiprocessing_helper,
-            #                                state.mod,
-            #                                candidate.sch.trace.as_json(),
-            #                                candidate.measured,
-            #                                num_trials,
-            #                                optimizer_logging,
-            #                                postprocs,
-            #                                state.context,
-            #                                state.cost_model,
-            #                                state.work_dir,
-            #                                state.rand_state)
-            #                for candidate in tune_candidates]
-
-            #     for future in as_completed(futures):
-            #         try:
-            #             trace_json, tuning_report = future.result()
-            #             sch = Schedule(mod=state.mod,
-            #                            seed=state.rand_state,
-            #                            debug_mask=0,
-            #                            error_render_level="none",)
-            #             Trace.apply_json_to_schedule(trace_json, sch)
-            #             tuned_schedules.append(sch)
-            #             analyse_tuning_report(tuning_report=tuning_report,
-            #                                   tuning_summary=None)
-            #             tuning_summary.enter_tuning_report(tuning_report)
-            #         except Exception as e:
-            #             print(f'Task generated an exception: {e}')
         else:
             for candidate in tune_candidates:
                 tuned_schedule, tuning_report = thread_helper(state.mod,
@@ -501,12 +473,12 @@ class BayOptTuner:
         self.mod = mod
         self.rand_state = rand_state
 
-        self.parallel_extend_tuning: bool = False
         self.log_tuning_traces: bool = False
         self.instruction_decsion_map = dict()
         self.tuning_report: TuningReport = TuningReport()
         self.possible_annotate_decisions: Dict[str, List[int]] = dict()
         self.path_optimizer_dir: str = self._get_optimizer_dir_path()
+        self.optimizer_save_design_space = True
 
         if self.optimizer_logging:
             self._setup_optimizer_dir()
@@ -822,7 +794,7 @@ class BayOptTuner:
         return pp.apply(mod=self.mod, trace=trace, rand_state=forkseed(self.rand_state))
 
     def _post_tuning_log_copy(self, tuned_sch: Schedule, untuned_sch: Schedule):
-        if self.optimizer_logging:
+        if self.optimizer_logging and not self.optimizer_save_design_space:
             # Save optimizer log with new trace id
             new_trace_id = create_hash(str(tuned_sch.trace))
             file_name: str = f"log_{new_trace_id}.json"
@@ -852,8 +824,15 @@ class BayOptTuner:
         if not self.optimizer_logging:
             return optimizer
         else:
-            # give each trace a unique name
-            trace_id: str = create_hash(str(untuned_sch.trace))
+            if self.optimizer_save_design_space:
+                # Each trace is seen without tunable decisions. Will group schedules together which only differ in
+                # their tiling and categorical sampling decisions.
+                trace_id: str = create_hash(str(
+                    BayOptTuner._get_trace_without_tiling_and_categorical_decisions(untuned_sch.trace)))
+            else:
+                # Each trace (with decisions) is seen as unique
+                trace_id: str = create_hash(str(untuned_sch.trace))
+
             file_name: str = f"log_{trace_id}.json"
             file_path: str = os.path.join(self.path_optimizer_dir, file_name)
 
@@ -867,18 +846,34 @@ class BayOptTuner:
             optimizer.subscribe(Events.OPTIMIZATION_STEP, logger)
             return optimizer
 
-    def _setup_optimizer_dir(self) -> None:
-        directory = os.path.dirname(self.path_optimizer_dir)
+    @staticmethod
+    def _get_trace_without_tiling_and_categorical_decisions(trace: Trace) -> Trace:
+        # 1. Get the trace without deadcode and convert to json for easier handling
+        trace = trace.simplified(True).as_json()
+        # 2. Get the current decisions which are at the end of the json trace
+        decisions: List = trace[len(trace) - 1]
 
-        if directory and not os.path.exists(self.path_optimizer_dir):
-            try:
-                os.mkdir(self.path_optimizer_dir)
-            except Exception:
-                pass
+        # 3. Now iterate through the instructions and remove the decisions for
+        #    tiling and categorical sampling
+        index = 0
+        for inst in trace[0]:
+            if inst[0] == "SamplePerfectTile" or inst[0] == "SampleCategorical":
+                decisions.pop(index)
+            elif inst[0] == "SampleComputeLocation":
+                index += 1
+
+        # 4. Update the decisions in the trace (Note this trace is effectively broken
+        #    and should only be used for IDs)
+        trace[len(trace) - 1] = decisions
+        return trace
+
+    def _setup_optimizer_dir(self):
+        if not os.path.exists(self.path_optimizer_dir):
+            os.makedirs(self.path_optimizer_dir)
 
     def _get_optimizer_dir_path(self) -> str:
         work_dir: str = self.work_dir
-        return os.path.join(work_dir, "optimizer_logs")
+        return os.path.join(work_dir, "optimizer_logs", self.context.task_name)
 
     def _find_matching_instruction(self, sch: Schedule, inst: Instruction):
         for new_inst, _ in sch.trace.decisions.items():
@@ -997,7 +992,7 @@ class TuningState:
         self.mod: IRModule = context.mod
         self.work_dir: str = self._get_work_dir()
 
-        self.design_spaces = []
+        self.design_spaces: List[Trace] = []
         for space in self.design_space_schedules:
             self.design_spaces.append(space.trace.simplified(True))
 
@@ -1193,10 +1188,10 @@ class TuningState:
             num_trials = 1
             optimizer_logging = False
         elif num_workload_db_entries < 256:
-            num_trials = 20
-            optimizer_logging = False
+            num_trials = 10
+            optimizer_logging = self.save_optimizer
         else:
-            num_trials = 40
+            num_trials = 20
             optimizer_logging = self.save_optimizer
 
         num_sch_to_tuner = len(tune_candidates)
