@@ -695,8 +695,9 @@ class BayOptTuner:
             optimizer.register(params=input_decisions, target=pre_tuning_score)
             discrete_points_registered[str(list(input_decisions.values()))] = None
         except NotUniqueError:
-            logger(logging.DEBUG, __name__, current_line_number(),
-                   "Duplicate point during optimizer initialization (database schedule)")
+            pass
+            # logger(logging.DEBUG, __name__, current_line_number(),
+            #        "Duplicate point during optimizer initialization (database schedule)")
 
         if self.validate_schedules:
             # Validate that recreated trace is identical to input trace
@@ -1068,7 +1069,7 @@ class TuningState:
                     num_explore_schedules += 1
 
             logger(logging.INFO, __name__, current_line_number(),
-                   f"Epsilon Greedy mixed {num_explore_schedules} random schedules into tuning set")
+                   f"Epsilon Greedy mixed {num_explore_schedules} top random schedules into tuning set")
         else:
             logger(logging.INFO, __name__, current_line_number(),
                    f"Epsilon Greedy mixed {len(mixed_list)} random schedules into runner set")
@@ -1107,7 +1108,7 @@ class TuningState:
         measured_schedules: List[Schedule] = []
         if num_workload_db_entries >= 128:
             # Top measured database schedules
-            num_measured_schedules = int(32)
+            num_measured_schedules = 32
             measured_schedules = self._pick_best_from_database(num_measured_schedules)
 
         # The XGB cost model will give random predictions if the workload does not have
@@ -1153,6 +1154,12 @@ class TuningState:
                                                                          epsilon=0.4,
                                                                          num=sample_num - len(random_candidates),
                                                                          fill_missing=True)
+
+        if self.validate_schedules:
+            tune_schs = TuningCandidate.get_schedules(tune_candidates)
+            # Gives some insight if a lot of duplicates enter the tuner
+            logger(logging.INFO, __name__, current_line_number(),
+                   f"Tuner set includes {get_num_unique_traces(tune_schs)} unique schedule(s)")
 
         # Sometimes it can make sense to bypass the tuner and prepare the sampled schedules for running immediatley
         # Possible reasons include: trace (design space) has no sample instructions, or first round bypass
@@ -1256,7 +1263,7 @@ class BayesianOptimizationSearch(PySearchStrategy):
     threaded: bool = True  # Currently using multiprocessing; performance questionable (high contention somewhere)
     save_optimizer: bool = True  # Enables optimizer saving; can be overwritten by optimizer phases
     full_first_round_bypass: bool = True  # Do not tune the first 64 schedules for each workload
-    validate_schedules: bool = False  # Use this for debugging; set False for benchmark runs
+    validate_schedules: bool = True  # Use this for debugging; set False for benchmark runs
 
     def _initialize_with_tune_context(self, context: "TuneContext") -> None:
         """Initialize the search strategy with tuning context.
