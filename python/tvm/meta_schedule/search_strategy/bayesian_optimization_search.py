@@ -35,6 +35,7 @@ import hashlib
 import os
 import shutil
 import json
+import time
 
 
 from bayes_opt import BayesianOptimization, UtilityFunction
@@ -242,9 +243,14 @@ class TuningReport:
     optimizer_failure: bool = False
     num_tuneable_insts: int = None
     num_duplicate_points_skipped: int = 0
+    num_points_probed: int = 0
+    measured: bool = False
 
     def create_tuning_result_message(self) -> String:
-        message = ""
+        if self.measured:
+            message = "(DB) "
+        else:
+            message = "(RN) "
 
         if self.pre_tuning_score:
             message = f"{self.pre_tuning_score:.4f} "
@@ -262,7 +268,8 @@ class TuningSummary:
     best_score: float = 0.0
     num_tune_failures: int = 0
     num_optimizer_failures: int = 0
-    num_duplicate_points_skipped = 0
+    num_duplicate_points_skipped: int = 0
+    num_points_probed: int = 0
 
     def enter_tuning_report(self, tuning_report: TuningReport):
         if tuning_report.tune_failure:
@@ -275,6 +282,7 @@ class TuningSummary:
                 self.best_score = tuning_report.last_tuning_score
 
         self.num_duplicate_points_skipped += tuning_report.num_duplicate_points_skipped
+        self.num_points_probed += tuning_report.num_points_probed
 
     def get_avg_improvement(self):
         if len(self.improvements) > 0:
@@ -293,6 +301,8 @@ class TuningSummary:
                f"Tuner: Number of Optimizer Failures {self.num_optimizer_failures}")
         logger(logging.INFO, __name__, current_line_number(),
                f"Tuner: Number of Duplicate Points Skipped {self.num_duplicate_points_skipped}")
+        logger(logging.INFO, __name__, current_line_number(),
+               f"Tuner: Number of Points Probed {self.num_points_probed}")
 
 
 def analyse_tuning_report(tuning_report: TuningReport, tuning_summary: TuningSummary):
@@ -479,6 +489,8 @@ class BayOptTuner:
         self.possible_annotate_decisions: Dict[str, List[int]] = dict()
         self.path_optimizer_dir: str = self._get_optimizer_dir_path()
         self.optimizer_save_design_space = True
+        self.max_optimizer_entries = 500
+        self.tuning_report.measured = self.measured
 
         if self.optimizer_logging:
             self._setup_optimizer_dir()
@@ -657,7 +669,7 @@ class BayOptTuner:
         discrete_points_registered = dict()
         optimizer = self._configure_optimizer_logging(untuned_sch=untuned_sch, optimizer=optimizer,
                                                       discrete_points_registered=discrete_points_registered)
-        utility = UtilityFunction(kind="ucb", kappa=5)
+        utility = UtilityFunction(kind="ucb", kappa=1)
 
         # Since our input into tuning are schedules with high scores we want to
         # register their decisions with the optimizer, so that it knows about a
@@ -680,7 +692,8 @@ class BayOptTuner:
         max_decisions: dict = None
 
         current_trial: int = 0
-        while (current_trial < self.max_trials):
+        start_time = time.time()
+        while (current_trial < self.max_trials and time.time() - start_time < 10):
             # Get the a list of decisions for the entered pbounds
             new_decision = False
             next_decisions = None
@@ -724,6 +737,8 @@ class BayOptTuner:
                 max_decisions = next_decisions
 
             current_trial += 1
+
+        self.tuning_report.num_points_probed = current_trial
 
         # If the original schedule was never measured (random schedule), and tuning did not improve
         # its score we return the original schedule. However, if we have already measured the schedule
@@ -833,17 +848,29 @@ class BayOptTuner:
                 # Each trace (with decisions) is seen as unique
                 trace_id: str = create_hash(str(untuned_sch.trace))
 
-            file_name: str = f"log_{trace_id}.json"
-            file_path: str = os.path.join(self.path_optimizer_dir, file_name)
+            file_path = os.path.join(self.path_optimizer_dir, f"log_{trace_id}_{0}.json")
+            newest_file = file_path
+            i = 0
+            while os.path.exists(newest_file):
+                file_path = newest_file
+                i += 1
+                newest_file = os.path.join(self.path_optimizer_dir, f"log_{trace_id}_{i}.json")
 
             # if file exists load
             if os.path.exists(file_path):
-                load_logs(optimizer, logs=file_path)
-                BayOptTuner.register_points(discrete_points_registered, file_path)
+                with open(file_path, 'r') as file:
+                    entries = sum(1 for line in file)
+
+                if self.max_optimizer_entries < entries:
+                    file_path = os.path.join(self.path_optimizer_dir, f"log_{trace_id}_{i}.json")
+                else:
+                    load_logs(optimizer, logs=file_path)
+                    BayOptTuner.register_points(discrete_points_registered, file_path)
 
             # turn logging on again, set reset accordingly
             logger = JSONLogger(path=file_path, reset=False)
             optimizer.subscribe(Events.OPTIMIZATION_STEP, logger)
+            self.optimizer_file_path = file_path
             return optimizer
 
     @staticmethod
@@ -1187,12 +1214,15 @@ class TuningState:
             # XGB Cost Model is not yet accurate
             num_trials = 1
             optimizer_logging = False
+            self.threaded = not optimizer_logging
         elif num_workload_db_entries < 256:
             num_trials = 10
             optimizer_logging = self.save_optimizer
+            self.threaded = not optimizer_logging
         else:
             num_trials = 20
             optimizer_logging = self.save_optimizer
+            self.threaded = not optimizer_logging
 
         num_sch_to_tuner = len(tune_candidates)
         logger(logging.INFO, __name__, current_line_number(),
@@ -1257,7 +1287,7 @@ class BayesianOptimizationSearch(PySearchStrategy):
     max_fail_count = 50
     threaded: bool = True  # Currently using multiprocessing; performance questionable (high contention somewhere)
     save_optimizer: bool = True  # Enables optimizer saving; can be overwritten by optimizer phases
-    full_first_round_bypass: bool = True  # Do not tune the first 64 schedules for each workload
+    full_first_round_bypass: bool = False  # Do not tune the first 64 schedules for each workload
     validate_schedules: bool = True  # Use this for debugging; set False for benchmark runs
 
     def _initialize_with_tune_context(self, context: "TuneContext") -> None:
