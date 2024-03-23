@@ -669,7 +669,7 @@ class BayOptTuner:
         discrete_points_registered = dict()
         optimizer = self._configure_optimizer_logging(untuned_sch=untuned_sch, optimizer=optimizer,
                                                       discrete_points_registered=discrete_points_registered)
-        utility = UtilityFunction(kind="ucb", kappa=1)
+        utility = UtilityFunction(kind="ucb", kappa=0.1)
 
         # Since our input into tuning are schedules with high scores we want to
         # register their decisions with the optimizer, so that it knows about a
@@ -727,10 +727,14 @@ class BayOptTuner:
                        f"Target {target} Schedule: \n {sch.trace}\n{sch.mod}")
 
             # register score with optimizer, to improve next prediction
-            optimizer.register(
-                params=next_decisions,
-                target=target,
-            )
+            try:
+                optimizer.register(
+                    params=next_decisions,
+                    target=target,
+                )
+            except NotUniqueError as e:
+                logger(logging.ERROR, __name__, current_line_number(),
+                       f"BO tried to register a duplicate point: {e}")
             # Save best run info
             if target >= max_target or max_decisions is None:
                 max_target = target
