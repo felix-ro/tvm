@@ -669,7 +669,9 @@ class BayOptTuner:
         discrete_points_registered = dict()
         optimizer = self._configure_optimizer_logging(untuned_sch=untuned_sch, optimizer=optimizer,
                                                       discrete_points_registered=discrete_points_registered)
-        utility = UtilityFunction(kind="ucb", kappa=5)
+
+        kappa = float(os.getenv("TVM_BO_KAPPA", "5"))
+        utility = UtilityFunction(kind="ucb", kappa=kappa)
 
         # Since our input into tuning are schedules with high scores we want to
         # register their decisions with the optimizer, so that it knows about a
@@ -1291,7 +1293,7 @@ class BayesianOptimizationSearch(PySearchStrategy):
     max_fail_count = 50
     threaded: bool = True  # Currently using multiprocessing; performance questionable (high contention somewhere)
     save_optimizer: bool = True  # Enables optimizer saving; can be overwritten by optimizer phases
-    full_first_round_bypass: bool = True  # Do not tune the first 64 schedules for each workload
+    full_first_round_bypass: bool = False  # Do not tune the first 64 schedules for each workload
     validate_schedules: bool = False  # Use this for debugging; set False for benchmark runs
 
     def _initialize_with_tune_context(self, context: "TuneContext") -> None:
