@@ -1220,15 +1220,12 @@ class TuningState:
             # XGB Cost Model is not yet accurate
             num_trials = 1
             optimizer_logging = False
-            self.threaded = not optimizer_logging
         elif num_workload_db_entries < 256:
             num_trials = 10
             optimizer_logging = self.save_optimizer
-            self.threaded = not optimizer_logging
         else:
             num_trials = 20
             optimizer_logging = self.save_optimizer
-            self.threaded = not optimizer_logging
 
         num_sch_to_tuner = len(tune_candidates)
         logger(logging.INFO, __name__, current_line_number(),
@@ -1291,7 +1288,7 @@ class BayesianOptimizationSearch(PySearchStrategy):
     init_measured_ratio = 0.1
     init_min_unmeasured = 50
     max_fail_count = 50
-    threaded: bool = True  # Currently using multiprocessing; performance questionable (high contention somewhere)
+    threaded: bool = False  # Currently using multiprocessing; performance questionable (high contention somewhere)
     save_optimizer: bool = True  # Enables optimizer saving; can be overwritten by optimizer phases
     full_first_round_bypass: bool = False  # Do not tune the first 64 schedules for each workload
     validate_schedules: bool = False  # Use this for debugging; set False for benchmark runs
