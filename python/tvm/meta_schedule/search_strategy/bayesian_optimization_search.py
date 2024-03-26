@@ -1033,10 +1033,18 @@ class TuningState:
         self.workload = database.commit_workload(self.mod)
 
     def _get_work_dir(self) -> str:
+        """Retrieves the working directory path
+
+        Returns
+        -------
+        path: str
+            The working directory path
+        """
         path_tuning_record: str = self.database.path_tuning_record
         return os.path.dirname(path_tuning_record)
 
     def reset(self):
+        """Resets the TuningState"""
         self.max_trials = None
         self.num_trials_per_iter = None
         self.design_spaces = None
