@@ -152,25 +152,6 @@ def get_possible_tiling_decisions(tile_product, num_tiles):
         return list(unique_combinations)
 
 
-def process_database_trace(trace_id, per_thread_data, picked_traces, postprocs: List["Postproc"], results, num_threads):
-    thread_id = trace_id % num_threads
-    data = per_thread_data[thread_id]
-    rand_state = data.rand_state
-    mod = data.mod
-
-    trace = picked_traces[trace_id]
-    result = results[trace_id]
-    assert result is None, f"result {trace_id} should be None"
-
-    sch: Schedule | None = create_schedule_from_trace(mod=mod, trace=trace, postprocs=postprocs,
-                                                      rand_state=forkseed(rand_state))
-
-    if sch is not None:
-        results[trace_id] = sch
-    else:
-        raise ValueError(f"Could not post-process trace from database:\n{trace}")
-
-
 def get_num_unique_traces(schs: List[Schedule]):
     trace_map = dict()
 
@@ -1063,24 +1044,52 @@ class TuningState:
         self.cost_model = None
 
     def _pick_best_from_database(self, num: int) -> List[Schedule]:
+        """Retrieves the best schedules for a workload from the database
+
+        Parameters
+        ----------
+        num: int
+            The number of best schedules to return
+
+        Returns
+        schedules: List[tvm.schedule.Schedule]
+            The list of the best-num of Schedules
+        """
         with Profiler.timeit("BayOptSearch/GenerateCandidates/PickBestFromDatabase"):
-            picked_traces: List[Trace] = []
-            # Load top k tuning records for a workload from database
+            # 1. Load top k tuning records for a workload from database
             tuning_records: List[TuningRecord] = self.database.get_top_k(self.workload, num)
+            picked_traces: List[Trace] = [record.trace for record in tuning_records]
 
-            for record in tuning_records:
-                picked_traces.append(record.trace)
+            # 2. Create Schedules from the traces
+            schedules: List[Schedule] = self._process_database_trace(picked_traces)
 
-            # Get the actual number of picked traces, (there may have not been enough in the database)
-            actual_num_picked = len(picked_traces)
-
-            results: List[Schedule] = [None] * actual_num_picked
-            for i in range(actual_num_picked):
-                process_database_trace(i, self.per_thread_data_, picked_traces, self.postprocs,
-                                       results, self.context.num_threads)
             logger(logging.INFO, __name__, current_line_number(),
-                   f"Picked {len(results)} schedules from database")
-            return results
+                   f"Picked {len(schedules)} schedules from database")
+            return schedules
+
+    def _process_database_trace(self, picked_traces) -> List[Schedule]:
+        """Turns a list of database Traces into Schedules
+
+        Parameters
+        ----------
+        picked_traces: List[tvm.schedule.Trace]
+            The picked Traces
+
+        Returns
+        database_schedules: List[tvm.schedule.Schedule]
+            The created database schedules
+        """
+        database_schedules: List[Schedule] = []
+
+        for trace in picked_traces:
+            sch: Schedule | None = create_schedule_from_trace(mod=self.mod, trace=trace, postprocs=self.postprocs,
+                                                              rand_state=forkseed(self.rand_state))
+
+            if sch is not None:
+                database_schedules.append(sch)
+            else:
+                raise ValueError(f"Could not post-process trace from database:\n{trace}")
+        return database_schedules
 
     def epsilon_greedy_mix(self, exploit_list: List[Schedule], explore_list: List[Schedule],
                            epsilon: float, num: int, fill_missing: bool) -> List[TuningCandidate]:
@@ -1112,18 +1121,29 @@ class TuningState:
                    f"Epsilon Greedy mixed {len(mixed_list)} random schedules into runner set")
         return mixed_list
 
-    def _detect_single_sample_operation(self):
+    @staticmethod
+    def _has_sample_instruction(traces: List[Trace]) -> bool:
+        """
+        Returns if a list of traces includes any sample instructions
+
+        Parameters
+        ----------
+        traces: tvm.schedule.Trace
+            The traces to check for sample instructions
+
+        Returns
+        -------
+        found_sample_inst: bool
+            If a sample instruction was found
+        """
+        # Function could potentially be moved to tvm.schedule.Trace
         sample_instructions = ["SampleComputeLocation", "SampleCategorical", "SamplePerfectTile"]
-        tunable = False
 
-        for i in range(len(self.design_spaces)):
-            for inst in self.design_spaces[i].insts:
+        for i in range(len(traces)):
+            for inst in traces[i].insts:
                 if inst.kind.name in sample_instructions:
-                    tunable = True
-
-        if not tunable:
-            self.num_trials_per_iter = 1
-            self.bypass_tuning_no_sample_inst = True
+                    return True
+        return False
 
     def generate_measure_candidates(self) -> Optional[List[MeasureCandidate]]:
         # Check if there are any trials left
@@ -1131,7 +1151,9 @@ class TuningState:
             return None
 
         # Some operators have no tunable instructions, so we only need a single sample
-        self._detect_single_sample_operation()
+        if not self._has_sample_instruction(traces=self.design_spaces):
+            self.num_trials_per_iter = 1
+            self.bypass_tuning_no_sample_inst = True
 
         # Check if next batch would go above max trial limit and adjust down
         sample_num = self.num_trials_per_iter
