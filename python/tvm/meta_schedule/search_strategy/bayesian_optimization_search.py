@@ -22,6 +22,7 @@ from ...contrib.popen_pool import PopenPoolExecutor, StatusKind
 if TYPE_CHECKING:
     from ..database import Database, TuningRecord
     from ..tune_context import TuneContext
+    from ..postproc import Postproc
 
 import numpy as np
 import copy
@@ -151,7 +152,7 @@ def get_possible_tiling_decisions(tile_product, num_tiles):
         return list(unique_combinations)
 
 
-def process_database_trace(trace_id, per_thread_data, picked_traces, pp: "ThreadedTraceApply", results, num_threads):
+def process_database_trace(trace_id, per_thread_data, picked_traces, postprocs: List["Postproc"], results, num_threads):
     thread_id = trace_id % num_threads
     data = per_thread_data[thread_id]
     rand_state = data.rand_state
@@ -161,7 +162,8 @@ def process_database_trace(trace_id, per_thread_data, picked_traces, pp: "Thread
     result = results[trace_id]
     assert result is None, f"result {trace_id} should be None"
 
-    sch: Schedule = pp.apply(mod=mod, trace=trace, rand_state=rand_state)
+    sch: Schedule | None = create_schedule_from_trace(mod=mod, trace=trace, postprocs=postprocs,
+                                                      rand_state=forkseed(rand_state))
 
     if sch is not None:
         results[trace_id] = sch
@@ -181,32 +183,38 @@ def get_num_unique_traces(schs: List[Schedule]):
     return len(trace_map.keys())
 
 
-class ThreadedTraceApply:
-    class Item:
-        postproc = None
-        fail_counter = 0
+def create_schedule_from_trace(mod: IRModule, trace: Trace, postprocs: List["Postproc"],
+                               rand_state: np.int64) -> Schedule | None:
+    """
+    Creates a post processed Schedule from a Trace and IRModule
 
-        def __init__(self, postproc):
-            self.postproc = postproc
+    Parameters
+    ----------
+    mod: tvm.ir.IRModule
+        The IRModule of the workload
+    trace: tvm.schedule.Trace
+        The trace to be applied
+    postprocs: tvm.meta_schedule.Postproc
+        The post-processors
+    rand_state: np.int64
+        A random state
 
-    def __init__(self, postprocs) -> None:
-        self.n_ = len(postprocs)
-        self.items_ = [self.Item(postprocs[i]) for i in range(self.n_)]
+    Returns
+    -------
+    sch: tvm.schedule.Schedule | None
+        The created schedule or None if post processing fails
+    """
+    sch = Schedule(mod=mod,
+                   seed=rand_state,
+                   debug_mask=0,
+                   error_render_level="none")
+    trace.apply_to_schedule(sch=sch, remove_postproc=True)
+    sch.enter_postproc()
 
-    def apply(self, mod: IRModule, trace: Trace, rand_state: np.int64) -> (Schedule | None):
-        sch = Schedule(mod=mod,
-                       seed=rand_state,
-                       debug_mask=0,
-                       error_render_level="none",)
-        trace.apply_to_schedule(sch=sch, remove_postproc=True)
-        sch.enter_postproc()
-
-        for i in range(self.n_):
-            item = self.items_[i]
-            if not item.postproc.apply(sch):
-                item.fail_counter += 1
-                return None
-        return sch
+    for postproc in postprocs:
+        if not postproc.apply(sch):
+            return None
+    return sch
 
 
 class PerThreadData:
@@ -811,8 +819,9 @@ class BayOptTuner:
         for inst, decision in list(decisions.items()):
             trace = trace.with_decision(inst=inst, decision=decision, remove_postproc=True)
 
-        pp = ThreadedTraceApply(postprocs=self.postprocs)
-        return pp.apply(mod=self.mod, trace=trace, rand_state=forkseed(self.rand_state))
+        # Create a new schedule from the updated trace and return it
+        return create_schedule_from_trace(mod=self.mod, trace=trace, postprocs=self.postprocs,
+                                          rand_state=forkseed(self.rand_state))
 
     def _post_tuning_log_copy(self, tuned_sch: Schedule, untuned_sch: Schedule):
         if self.optimizer_logging and not self.optimizer_save_design_space:
@@ -959,11 +968,11 @@ class BayOptTuner:
         return score[0]
 
     def _apply_annotation_to_trace(self, trace: Trace, ann_inst: Instruction,
-                                   ann_val: np.int64, mod: IRModule):
+                                   ann_val: np.int64, mod: IRModule) -> Schedule | None:
         trace = trace.change_annotation_in_trace(ann_inst, ann_val)
 
-        pp = ThreadedTraceApply(postprocs=self.postprocs)
-        return pp.apply(mod=mod, trace=trace, rand_state=1)
+        return create_schedule_from_trace(mod=mod, trace=trace, postprocs=self.postprocs,
+                                          rand_state=forkseed(self.rand_state))
 
     def _build_decision_dict(self, untuned_sch: Schedule, next_decisions) -> Dict[Instruction, DECISION_TYPE]:
         result_decisions: Dict[Instruction, DECISION_TYPE] = dict()
@@ -1064,11 +1073,11 @@ class TuningState:
 
             # Get the actual number of picked traces, (there may have not been enough in the database)
             actual_num_picked = len(picked_traces)
-            pp: ThreadedTraceApply = ThreadedTraceApply(self.postprocs)
 
             results: List[Schedule] = [None] * actual_num_picked
             for i in range(actual_num_picked):
-                process_database_trace(i, self.per_thread_data_, picked_traces, pp, results, self.context.num_threads)
+                process_database_trace(i, self.per_thread_data_, picked_traces, self.postprocs,
+                                       results, self.context.num_threads)
             logger(logging.INFO, __name__, current_line_number(),
                    f"Picked {len(results)} schedules from database")
             return results
@@ -1239,7 +1248,6 @@ class TuningState:
 
     def _sample_initial_population(self, num_traces: int) -> List[Schedule]:
         with Profiler.timeit("BayOptSearch/GenerateCandidates/SamplePopulation"):
-            postproc = ThreadedTraceApply(self.postprocs)
             output_schedules: List[Schedule] = []
             fail_count: int = 0
             while (fail_count < self.max_fail_count and
@@ -1257,7 +1265,8 @@ class TuningState:
 
                     design_space_index: int = sample_int(rand_state, 0, len(self.design_spaces))
                     trace: Trace = Trace(self.design_spaces[design_space_index].insts, {})
-                    sch: Schedule = postproc.apply(mod=mod, trace=trace, rand_state=forkseed(rand_state))
+                    sch: Schedule | None = create_schedule_from_trace(mod=mod, trace=trace, postprocs=self.postprocs,
+                                                                      rand_state=forkseed(rand_state))
                     if (sch is not None):
                         results[trace_id] = sch
 
@@ -1291,7 +1300,7 @@ class BayesianOptimizationSearch(PySearchStrategy):
     threaded: bool = False  # Currently using multiprocessing; performance questionable (high contention somewhere)
     save_optimizer: bool = True  # Enables optimizer saving; can be overwritten by optimizer phases
     full_first_round_bypass: bool = False  # Do not tune the first 64 schedules for each workload
-    validate_schedules: bool = False  # Use this for debugging; set False for benchmark runs
+    validate_schedules: bool = True  # Use this for debugging; set False for benchmark runs
 
     def _initialize_with_tune_context(self, context: "TuneContext") -> None:
         """Initialize the search strategy with tuning context.
