@@ -1309,7 +1309,7 @@ class TuningState:
         return assemble_candidates(run_schedules)
 
     def _get_num_workload_entries(self) -> int:
-        """Retrieve the number of database entries for a given workload
+        """Retrieve the number of database entries for a given workload (max = 256)
 
         Returns
         ----------
