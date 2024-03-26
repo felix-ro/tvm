@@ -1319,6 +1319,34 @@ class TuningState:
         return len(self.database.get_top_k(self.workload, 256))
 
     def _send_to_bayesian_tuner(self, tune_candidates: List[TuningCandidate]) -> List[Schedule]:
+        """Configures the settings with which the Bayesian Optimizer will tune the schedules, and sends them for tuning.
+
+        Phase Information
+        -----------------
+        Phase 1: Less than 64 entries in the database for the given workload
+            - XGB Cost Model is gives random predicitons
+            - Therefore do not save the optimizer
+            - Only do one trial (we mostly care about a broader sampling of annotations)
+
+        Phase 2: Less than 256 entries in the database for the given workload
+            - XGB Cost Model has become more accurate
+            - We can save the optimizer now
+            - Set the number of trials to 10 (cost model still not accurate enough to invest more)
+
+        Phase 3: More or equal to 256 entries in the database for the given workload
+            - XGB Cost Model is now reliable
+            - Increase the number of trials to 20
+
+        Parameters
+        ----------
+        tune_candidates: List[TuningCandidate]
+            The candidate schedules for tuning
+
+        Returns
+        -------
+        tuned_schedules: List[tvm.schedule.Schedule]
+            The list of tuned schedules
+        """
         num_workload_db_entries = self._get_num_workload_entries()
 
         num_trials = 0
