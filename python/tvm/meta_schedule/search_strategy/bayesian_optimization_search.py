@@ -1246,39 +1246,44 @@ class TuningState:
         logger(logging.INFO, __name__, current_line_number(), "Bayesian optimization tuner finished")
         return tuned_schedules
 
-    def _sample_initial_population(self, num_traces: int) -> List[Schedule]:
+    def _sample_initial_population(self, num_schedules: int) -> List[Schedule]:
+        """
+        Samples an initital population of random schedules, which differ in their decisions
+
+        Parameters
+        ----------
+        num_schedules: int
+            The number of schedules to randomly sample
+
+        Returns
+        -------
+        schedules: List[tvm.schedule.Schedule]
+        """
         with Profiler.timeit("BayOptSearch/GenerateCandidates/SamplePopulation"):
             output_schedules: List[Schedule] = []
             fail_count: int = 0
             while (fail_count < self.max_fail_count and
                    len(output_schedules) < self.init_min_unmeasured):
 
-                results = [None] * num_traces
-
-                def f_proc_unmeasured(thread_id: int, trace_id: int):
-                    thread_id = thread_id % self.context.num_threads
-                    data: PerThreadData = self.per_thread_data_[thread_id]
-                    rand_state: np.int64 = data.rand_state
-                    mod: IRModule = data.mod
-
-                    assert results[trace_id] is None, f"results {trace_id} should be None"
-
-                    design_space_index: int = sample_int(rand_state, 0, len(self.design_spaces))
+                def create_random_schedule() -> Schedule | None:
+                    # 1. Randomly pick a design space
+                    design_space_index: int = sample_int(self.rand_state, 0, len(self.design_spaces))
+                    # 2. Create a trace with random decisions from design space instructions
                     trace: Trace = Trace(self.design_spaces[design_space_index].insts, {})
-                    sch: Schedule | None = create_schedule_from_trace(mod=mod, trace=trace, postprocs=self.postprocs,
-                                                                      rand_state=forkseed(rand_state))
+                    # 3. Create a schedule from trace
+                    sch: Schedule | None = create_schedule_from_trace(mod=self.mod, trace=trace,
+                                                                      postprocs=self.postprocs,
+                                                                      rand_state=forkseed(self.rand_state))
+                    return sch
+
+                # Sample random traces
+                for i in range(num_schedules):
+                    sch: Schedule | None = create_random_schedule()
                     if (sch is not None):
-                        results[trace_id] = sch
+                        output_schedules.append(sch)
+                    else:
+                        fail_count += 1
 
-                for i in range(num_traces):
-                    f_proc_unmeasured(i, i)
-
-                found_new: bool = False
-                for i in range(num_traces):
-                    if (results[i] is not None):
-                        found_new = True
-                        output_schedules.append(results[i])
-                fail_count += not found_new
             logger(logging.INFO, __name__, current_line_number(),
                    f"Sampled {len(output_schedules)} new random schedules")
             return output_schedules
