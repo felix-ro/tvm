@@ -17,15 +17,12 @@ from ..profiler import Profiler
 from ..cost_model import CostModel
 from ...contrib.popen_pool import PopenPoolExecutor, StatusKind
 
-# from concurrent.futures import as_completed, ProcessPoolExecutor
-
 if TYPE_CHECKING:
     from ..database import Database, TuningRecord
     from ..tune_context import TuneContext
     from ..postproc import Postproc
 
 import numpy as np
-import copy
 import random
 import functools
 import operator
@@ -38,7 +35,6 @@ import shutil
 import json
 import time
 
-
 from bayes_opt import BayesianOptimization, UtilityFunction
 from bayes_opt.logger import JSONLogger
 from bayes_opt.event import Events
@@ -50,29 +46,46 @@ ATTR_TYPE = Any
 
 
 decision_lookup = dict()
-
 logger = get_logging_func(get_logger(__name__))
 
 
 def create_hash(input_string: str) -> str:
+    """Returns the hash-str of an input string
+
+    Parameters
+    ----------
+    input_string: str
+        The input string
+
+    Returns
+    -------
+    hash_string: str
+        The corresponding hash-str
+    """
     input_bytes = input_string.encode('utf-8')
     hash_obj = hashlib.sha256(input_bytes)
-    hash_hex: str = hash_obj.hexdigest()
-
-    return hash_hex
+    return hash_obj.hexdigest()
 
 
-def current_line_number():
+def current_line_number() -> int:
+    """Returns the line number this function is called on
+
+    Returns
+    -------
+    line_number: int
+        The line number the function is called on
+    """
     return inspect.currentframe().f_back.f_lineno
 
 
-def forkseed(rand_state):
+# ToDo rework this function
+def forkseed(rand_state) -> int:
     rand_state = int(rand_state+random.random()*1999999973)
     new_rand_state = (rand_state * 32767) % 1999999973
     return new_rand_state
 
 
-# min_inclusive & max_exclusive: [min, max)
+# ToDo rework this function
 def sample_int(rand_state: np.int64, min_inclusive: int, max_exclusive: int):
     assert min_inclusive < max_exclusive, "ValueError: max_exclusive must be greater than min_inclusive."
 
@@ -196,15 +209,6 @@ def create_schedule_from_trace(mod: IRModule, trace: Trace, postprocs: List["Pos
         if not postproc.apply(sch):
             return None
     return sch
-
-
-class PerThreadData:
-    mod: IRModule = None
-    rand_state: np.int64 = np.int64(-1)
-
-    def __init__(self) -> None:
-        self.mod = None
-        self.rand_state = np.int64(-1)
 
 
 class TuningCandidate:
@@ -1025,11 +1029,6 @@ class TuningState:
         self.max_fail_count: int = 300
         self.bypass_tuning_no_sample_inst: bool = False
 
-        self.per_thread_data_ = [PerThreadData() for i in range(self.context.num_threads)]
-        for i in range(self.context.num_threads):
-            self.per_thread_data_[i].mod = copy.deepcopy(self.mod)
-            self.per_thread_data_[i].rand_state = forkseed(self.rand_state)
-
         self.workload = database.commit_workload(self.mod)
 
     def _get_work_dir(self) -> str:
@@ -1319,6 +1318,7 @@ class TuningState:
             return output_schedules
 
     def notify_runner_results(self, measure_candidates: List[MeasureCandidate], results: List[RunnerResult]):
+        """This function does not currently perform any real work"""
         self.st += len(results)
         self.ed += len(results)
 
