@@ -40,10 +40,8 @@ from bayes_opt.logger import JSONLogger
 from bayes_opt.event import Events
 from bayes_opt.util import load_logs, NotUniqueError
 
-
 DECISION_TYPE = Any
 ATTR_TYPE = Any
-
 
 decision_lookup = dict()
 logger = get_logging_func(get_logger(__name__))
@@ -100,6 +98,24 @@ def sample_int(rand_state: np.int64, min_inclusive: int, max_exclusive: int):
 
 def get_top_k_schedules(context: "TuneContext", cost_model: CostModel,
                         schedules: List[Schedule], k: int) -> Union[List[Schedule] | List[float]]:
+    """Returns the top-k Schedules in a list of Schedules based on a cost model
+
+    Parameters
+    ----------
+    context: tvm.meta_schedule.TuneContext
+        The tuning context
+    cost_model: tvm.meta_schedule.CostModel
+        The cost model to use for the selection
+    schedules: List[tvm.schedule.Schedule]
+        The list of Schedules to select from
+    k: int
+        The number of Schedules to select
+
+    Returns
+    -------
+    best_schedules: List[tvm.schedule.Schedule]
+        The top-k Schedules in the list of Schedules
+    """
     with Profiler.timeit("BayOptSearch/GenerateCandidates/GetTopKSchedules"):
         scores = predict_normalized_scores(schedules, context, cost_model)
         idx = np.argsort(scores)[-k:][::-1]
