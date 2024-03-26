@@ -129,11 +129,19 @@ def get_top_k_schedules(context: "TuneContext", cost_model: CostModel,
 
 
 def assemble_candidates(picks: List[Schedule]) -> List[MeasureCandidate]:
-    """Assemble a list of candidates from a list of schedules."""
-    measure_inputs = [None for _ in range(len(picks))]
-    for i, sch in enumerate(picks):
-        measure_inputs[i] = MeasureCandidate(sch, ArgInfo.from_entry_func(sch.mod, remove_preproc=True))
-    return measure_inputs
+    """Assemble a list of candidates from a list of schedules
+
+    Parameters
+    ----------
+    picks: List[tvm.schedule.Schedule]
+        The schedules to turn into MeasureCandidates
+
+    Returns
+    -------
+    measurement_candidates: List[tvm.meta_schedule.MeasureCandidate]
+        The list of MeasureCandidates
+    """
+    return [MeasureCandidate(sch, ArgInfo.from_entry_func(sch.mod, remove_preproc=True)) for sch in picks]
 
 
 def predict_normalized_scores(candidates: List[Schedule], context: "TuneContext", cost_model: "CostModel"):
