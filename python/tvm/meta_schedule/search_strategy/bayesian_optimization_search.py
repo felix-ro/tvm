@@ -553,13 +553,16 @@ class BayOptTuner:
             self._setup_optimizer_dir()
 
     def tune(self) -> Union[Schedule | TuningReport]:
-        sch_phase_one: Schedule = self._tune_tiling_and_unrole(self.schedule)
-        sch_phase_two: Schedule = self._tune_parallel_annotation(sch_phase_one)
-        sch_phase_three: Schedule = self._tune_compute_location(sch_phase_two)
+        with Profiler.timeit("BayOptSearch/Tuner/Tune/BayesianPhase"):
+            sch_phase_one: Schedule = self.bayesian_phase(self.schedule)
+        with Profiler.timeit("BayOptSearch/Tuner/Tune/ParallelPhase"):
+            sch_phase_two: Schedule = self.parallel_phase(sch_phase_one)
+        with Profiler.timeit("BayOptSearch/Tuner/Tune/ComputeLocationPhase"):
+            sch_phase_three: Schedule = self.compute_location_phase(sch_phase_two)
 
         return sch_phase_three, self.tuning_report
 
-    def _tune_compute_location(self, sch: Schedule):
+    def compute_location_phase(self, sch: Schedule):
         MAX_CANDIDATES = 64
 
         # 1. Get all compute location insts
@@ -627,7 +630,7 @@ class BayOptTuner:
 
         return candidates
 
-    def _tune_parallel_annotation(self, sch: Schedule) -> Schedule:
+    def parallel_phase(self, sch: Schedule) -> Schedule:
         possible_decision_dict: Dict[Instruction, List[int]] = dict()
 
         # Find all parallel annotations and possible decisions
@@ -704,7 +707,7 @@ class BayOptTuner:
 
         return input_decisions
 
-    def _tune_tiling_and_unrole(self, untuned_sch: Schedule) -> Schedule:
+    def bayesian_phase(self, untuned_sch: Schedule) -> Schedule:
         pre_tuning_score = self._predict_normalized_score(untuned_sch)
         self.tuning_report.pre_tuning_score = pre_tuning_score
         self.tuning_report.last_tuning_score = pre_tuning_score
@@ -1384,7 +1387,7 @@ class TuningState:
             return output_schedules
 
     def notify_runner_results(self, measure_candidates: List[MeasureCandidate], results: List[RunnerResult]):
-        """This function does not currently perform any real work"""
+        """This function does not perform any real work currently"""
         self.st += len(results)
         self.ed += len(results)
 
