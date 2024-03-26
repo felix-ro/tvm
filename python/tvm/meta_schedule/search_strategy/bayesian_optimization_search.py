@@ -146,11 +146,26 @@ def assemble_candidates(picks: List[Schedule]) -> List[MeasureCandidate]:
     return [MeasureCandidate(sch, ArgInfo.from_entry_func(sch.mod, remove_preproc=True)) for sch in picks]
 
 
-def predict_normalized_scores(candidates: List[Schedule], context: "TuneContext", cost_model: "CostModel"):
-    """Predict the normalized score of a list of candidates."""
-    assert len(candidates) != 0, "Candidates given for score prediction can not be empty list!"
-    scores = cost_model.predict(context, assemble_candidates(candidates))
+def predict_normalized_scores(schedules: List[Schedule], context: "TuneContext",
+                              cost_model: "CostModel") -> List[float]:
+    """Predict the normalized score of a list of candidates
 
+    Parameters
+    ----------
+    schedules: List[tvm.schedule.Schedule]
+        The list of schedules to predict scores for
+    context: tvm.meta_schedule.TuneContext
+        The tune context
+    cost_model: tvm.meta_schedule.CostModel
+        The cost_model to use for the prediction
+
+    Returns
+    -------
+    scores: List[float]
+        The predicted scores
+    """
+    assert len(schedules) != 0, "Candidates given for score prediction can not be empty list!"
+    scores = cost_model.predict(context, assemble_candidates(schedules))
     return list(scores)
 
 
@@ -973,7 +988,7 @@ class BayOptTuner:
         return pbounds
 
     def _predict_normalized_score(self, sch: Schedule) -> float:
-        score = predict_normalized_scores(candidates=[sch],
+        score = predict_normalized_scores(schedules=[sch],
                                           context=self.context,
                                           cost_model=self.cost_model)
         return score[0]
