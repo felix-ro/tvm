@@ -1222,40 +1222,48 @@ class TuningState:
         return False
 
     def generate_measure_candidates(self) -> Optional[List[MeasureCandidate]]:
-        # Check if there are any trials left
+        """Generates the measurements candidates. This function handles the main control flow
+
+        Returns
+        -------
+        measurement_candidates: List[tvm.meta_schedule.MeasureCandidate]
+            The tuned measurement candidates
+        """
+        # 1. Check if there are any trials left
         if (self.st >= self.max_trials):
             return None
 
-        # Some operators have no tunable instructions, so we only need a single sample
+        # 2. Some workloads have no sample instructions, so we can skip tuning and reduce population
         if not self._has_sample_instruction(traces=self.design_spaces):
-            self.num_trials_per_iter = 1
+            self.num_trials_per_iter = len(self.design_spaces)
             self.bypass_tuning_no_sample_inst = True
 
-        # Check if next batch would go above max trial limit and adjust down
+        # 3. Check if next batch would go above max trial limit and adjust down
         sample_num = self.num_trials_per_iter
         if (self.ed > self.max_trials):
             sample_num = self.max_trials - self.st
             self.ed = self.max_trials
 
-        assert self.st < self.ed, f"check failed: {self.st} < {self.ed}"
+        assert self.st < self.ed, f"Check failed: {self.st} < {self.ed}"
 
+        # 4. When there are more than 128 entries for a workload in the database
+        #    we start mixing the best ones into the tuning set
         num_workload_db_entries = self._get_num_workload_entries()
         measured_schedules: List[Schedule] = []
         if num_workload_db_entries >= 128:
-            # Top measured database schedules
-            num_measured_schedules = 32
-            measured_schedules = self._pick_best_from_database(num_measured_schedules)
+            # Get the top 32 measured schedules in the database
+            measured_schedules = self._pick_best_from_database(32)
 
-        # The XGB cost model will give random predictions if the workload does not have
-        # atleast 64 hardware measurement results. Therefore, it can be time efficient to
-        # bypass the tuning stage on the first iter of each workload.
+        # 5. The XGB cost model will give random predictions if the workload does not have
+        #    atleast 64 hardware measurement results. Therefore, it can be time efficient to
+        #    bypass the tuning stage on the first iter of each workload.
         first_iter_bypass: bool = False
         if num_workload_db_entries < 64 and self.full_first_round_bypass:
             first_iter_bypass = True
             logger(logging.INFO, __name__, current_line_number(),
                    "Bypassing BO Tuner, since XGB cost model is not accurate yet")
 
-        # Sample a new population of random schedules
+        # 6. Sample a new population of random schedules
         unmeasured_schedules: List[Schedule] = self._sample_initial_population(self.population_size)
 
         if self.validate_schedules:
@@ -1263,27 +1271,27 @@ class TuningState:
             logger(logging.INFO, __name__, current_line_number(),
                    f"Sampling included {get_num_unique_traces(unmeasured_schedules)} unique schedule(s)")
 
-        # Check if minimum amount of schedules were sampled
+        # 7. Check if minimum amount of schedules were sampled
         if (len(unmeasured_schedules) < self.init_min_unmeasured):
-            raise ValueError  # Specify a better error here
+            raise ValueError("Could not sample a sufficient number of random schedules")
 
         logger(logging.INFO, __name__, current_line_number(),
                f"Prepared a population of {len(measured_schedules) + len(unmeasured_schedules)} " +
                "schedules for selection")
 
-        # Pick the random and untuned schedules for running (prevent cost model from overfitting)
+        # 8. Pick the random and untuned schedules for running (prevent cost model from overfitting)
         random_candidates: List[TuningCandidate] = self.epsilon_greedy_mix(exploit_list=[],
                                                                            explore_list=unmeasured_schedules,
                                                                            epsilon=0.2,
                                                                            num=sample_num,
                                                                            fill_missing=False)
 
-        # Get the best schedules from population
+        # 9. Get the best schedules from population
         best_unmeasured_schedules, _ = get_top_k_schedules(self.context, self.cost_model, unmeasured_schedules, 32)
 
-        # Pick a mix of measured schedules and unmeasured for tuning.
-        # The number of schedules send to the tuner is decided by how many random
-        # schedules were selected for direct measurement.
+        # 10. Pick a mix of measured schedules and unmeasured for tuning.
+        #     The number of schedules send to the tuner is decided by how many random
+        #     schedules were selected for direct measurement.
         tune_candidates: List[TuningCandidate] = self.epsilon_greedy_mix(exploit_list=measured_schedules,
                                                                          explore_list=best_unmeasured_schedules,
                                                                          epsilon=0.4,
@@ -1292,20 +1300,22 @@ class TuningState:
 
         if self.validate_schedules:
             tune_schs = TuningCandidate.get_schedules(tune_candidates)
-            # Gives some insight if a lot of duplicates enter the tuner
+            # Gives some insight on the number of duplicates entering the tuner
             logger(logging.INFO, __name__, current_line_number(),
                    f"Tuner set includes {get_num_unique_traces(tune_schs)} unique schedule(s)")
 
-        # Sometimes it can make sense to bypass the tuner and prepare the sampled schedules for running immediatley
-        # Possible reasons include: trace (design space) has no sample instructions, or first round bypass
+        # 11. Sometimes it can make sense to bypass the tuner and prepare the sampled schedules for running immediatley
+        #     Possible reasons include: design spaces don't have sample instructions, or first round bypass
         if self.bypass_tuning_no_sample_inst or first_iter_bypass:
             run_schedules = TuningCandidate.get_schedules(random_candidates) + \
                             TuningCandidate.get_schedules(tune_candidates)
         else:
+            # 12. Send the tuning candidates to the tuner
             tuned_schedules: List[Schedule] = self._send_to_bayesian_tuner(tune_candidates)
             run_schedules = TuningCandidate.get_schedules(random_candidates) + tuned_schedules
 
         assert len(run_schedules) == sample_num
+        # 13. Assemble the measurement candidates
         return assemble_candidates(run_schedules)
 
     def _get_num_workload_entries(self) -> int:
