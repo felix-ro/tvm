@@ -1402,13 +1402,15 @@ class TuningState:
                                                                       rand_state=forkseed(self.rand_state))
                     return sch
 
-                # Sample random traces
+                # 4. Sample random traces
                 for i in range(num_schedules):
                     sch: Schedule | None = create_random_schedule()
                     if (sch is not None):
                         output_schedules.append(sch)
                     else:
                         fail_count += 1
+                # 5. Adjust the number of remaining schedules (in case of failures > 0)
+                num_schedules -= len(output_schedules)
 
             logger(logging.INFO, __name__, current_line_number(),
                    f"Sampled {len(output_schedules)} new random schedules")
@@ -1427,7 +1429,7 @@ class BayesianOptimizationSearch(PySearchStrategy):
 
     population_size = 1024  # The number of random schedules sampled
     init_measured_ratio = 0.1
-    init_min_unmeasured = 50
+    init_min_unmeasured = 256
     max_fail_count = 50
     threaded: bool = False  # Currently using multiprocessing; performance questionable (high contention somewhere)
     save_optimizer: bool = True  # Enables optimizer saving; can be overwritten by optimizer phases
