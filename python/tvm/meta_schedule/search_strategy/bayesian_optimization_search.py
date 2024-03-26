@@ -1,4 +1,4 @@
-from typing import TYPE_CHECKING, List, Optional, Any, Dict, Union
+from typing import TYPE_CHECKING, List, Optional, Any, Dict, Union, Tuple
 from tvm.tir.schedule import Schedule, Trace, Instruction, BlockRV
 from tvm.tir.analysis import (is_annotate_with_parallel,
                               get_possible_parallel_annotate_decisions,
@@ -169,18 +169,34 @@ def predict_normalized_scores(schedules: List[Schedule], context: "TuneContext",
     return list(scores)
 
 
-def get_possible_tiling_decisions(tile_product, num_tiles):
-    """Generates all unique combinations of num_tiles integers whose product equals tile_product"""
-    with Profiler.timeit("BayOptSearch/Tuner/Tune/GetPossibleTilingDecisions"):
-        # Special case handling for x=1
-        if tile_product == 1:
-            return [(1,) * num_tiles]  # Return a list with a single tuple of n 1s
+def get_possible_tiling_decisions(tile_product: int, num_tiles: int, max_inntermost_factor=64) -> List[Tuple]:
+    """Generates all unique combinations of num_tiles integers whose product equals tile_product
 
-        # Base case handling
+    Parameters
+    ----------
+    tile_product: int
+        The product the tile factors need to multiply to
+    num_tiles: int
+        The number of tiles (factors)
+    max_innermost_factor: int
+        The largest innermost tile (factor)
+
+    Returns
+    -------
+    possible_tiling_decisions: List[Tuple]
+        The list of possible tiling decisions
+    """
+    with Profiler.timeit("BayOptSearch/Tuner/Tune/GetPossibleTilingDecisions"):
+        # 1. If the tile_product is equal to one, return a  a list with a single tuple of n 1s
+        if tile_product == 1:
+            return [(1,) * num_tiles]
+        # 2. Catch negative tile products and raise error
         if tile_product < 0:
-            return "No solution for negative X with only positive integers."
-        if num_tiles <= 0:
-            return "Invalid n. n must be greater than 0."
+            raise ValueError(f"The tile product can not be a negative value. Was tile_product = {tile_product}")
+        # 3. Catch invalid numer of tiles orr max innerfactor and raise error
+        if num_tiles <= 0 or max_inntermost_factor <= 0:
+            raise ValueError(f"The number of tiles must be greater than 0. Was num_tiles = {num_tiles},"
+                             "max_innermost_factor = {max_inntermost_factor}")
 
         def factor_combinations(x, start=2, current=[]):
             """Recursively find all factor combinations of x."""
@@ -191,17 +207,19 @@ def get_possible_tiling_decisions(tile_product, num_tiles):
                     if x % i == 0:
                         yield from factor_combinations(x // i, i, current + [i])
 
-        # Generate all factor combinations
+        # 4. Generate all factor combinations that result in tile_product
         all_factors = list(factor_combinations(tile_product))
 
-        # Generate all unique combinations of n elements
+        # 5. Generate all unique combinations of n elements
         unique_combinations = set()
         for factors in all_factors:
             if len(factors) <= num_tiles:
                 padded_factors = factors + [1] * (num_tiles - len(factors))  # Pad with 1s if necessary
-                # Generate all permutations of padded_factors to ensure uniqueness
+                # 6. Generate all permutations of padded_factors to ensure uniqueness
                 for perm in set(permutations(padded_factors)):
-                    unique_combinations.add(perm)
+                    # 7. Ensure the innermost factor is not larger than the max
+                    if perm[-1] <= max_inntermost_factor:
+                        unique_combinations.add(perm)
 
         return list(unique_combinations)
 
@@ -968,12 +986,14 @@ class BayOptTuner:
             # print(inst.outputs, inst, decisions)
             if inst.kind.name == "SamplePerfectTile":
                 n_splits: int = int(inst.attrs[0])
+                max_innermost_factor: int = int(inst.attrs[1])
                 total_loop_iters: int = int(functools.reduce(operator.mul, decisions))
 
                 # Only calculate possible decisions for each pattern once
                 decision_key = ("SamplePerfectTile", n_splits, total_loop_iters)
                 if decision_key not in decision_lookup:
-                    possible_decisions = get_possible_tiling_decisions(total_loop_iters, n_splits)
+                    possible_decisions = get_possible_tiling_decisions(total_loop_iters, n_splits,
+                                                                       max_innermost_factor)
                     possible_decisions.sort()  # Sort in ascending order, to give the list structure
                     # print(n_splits, total_loop_iters, possible_decisions)
                     decision_lookup[decision_key] = possible_decisions
