@@ -224,16 +224,21 @@ def get_possible_tiling_decisions(tile_product: int, num_tiles: int, max_innterm
         return list(unique_combinations)
 
 
-def get_num_unique_traces(schs: List[Schedule]):
-    trace_map = dict()
+def get_num_unique_traces(schedules: List[Schedule]):
+    """Returns the number unique Traces in a list of Schedules
 
-    for sch in schs:
-        if str(sch.trace) in trace_map:
-            trace_map[str(sch.trace)] = +1
-        else:
-            trace_map[str(sch.trace)] = 1
+    Parameters
+    ----------
+    schedules: List[tvm.schedule.Schedule]
+        The list of Schedules
 
-    return len(trace_map.keys())
+    Returns
+    -------
+    num: int
+        The number of unique Traces in the list of Schedules
+    """
+    unique_traces = {str(sch.trace.simplified(remove_postproc=False)) for sch in schedules}
+    return len(unique_traces)
 
 
 def create_schedule_from_trace(mod: IRModule, trace: Trace, postprocs: List["Postproc"],
