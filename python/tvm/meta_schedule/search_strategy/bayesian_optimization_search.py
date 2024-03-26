@@ -113,8 +113,10 @@ def get_top_k_schedules(context: "TuneContext", cost_model: CostModel,
 
     Returns
     -------
-    best_schedules: List[tvm.schedule.Schedule]
+    top_schedules: List[tvm.schedule.Schedule]
         The top-k Schedules in the list of Schedules
+    top_scores: List[float]
+        The corresponding scores to the schedules
     """
     with Profiler.timeit("BayOptSearch/GetTopKSchedules"):
         scores = predict_normalized_scores(schedules, context, cost_model)
