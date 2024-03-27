@@ -1016,13 +1016,43 @@ class BayOptTuner:
         return pbounds
 
     def _predict_normalized_score(self, sch: Schedule) -> float:
+        """Wrapper that allows for score prediction of a single Schedule
+
+        Parameters
+        ----------
+        sch: tvm.schedule.Schedule
+            The schedule to predict a score for
+
+        Returns
+        -------
+        score: float
+            The predicted score
+        """
         score = predict_normalized_scores(schedules=[sch],
                                           context=self.context,
                                           cost_model=self.cost_model)
         return score[0]
 
     def _apply_annotation_to_trace(self, trace: Trace, ann_inst: Instruction,
-                                   ann_val: np.int64, mod: IRModule) -> Schedule | None:
+                                   ann_val: np.int64, mod: IRModule) -> Optional[Schedule]:
+        """Allows for the application of an annotation to a trace
+
+        Parameters
+        ----------
+        trace: tvm.schedule.Trace
+            The trace to change the annotation in
+        ann_inst: tvm.tir.Instruction
+            The annotation Instruction
+        ann_val: np.int64
+            The value to change the annotation to
+        mod: tvm.ir.IRModule
+            The IRModule of the workload
+
+        Returns
+        -------
+        sch: Optional[Schedule]
+            Returns schedule with changed annotation if successful
+        """
         trace = trace.change_annotation_in_trace(ann_inst, ann_val)
 
         return create_schedule_from_trace(mod=mod, trace=trace, postprocs=self.postprocs,
