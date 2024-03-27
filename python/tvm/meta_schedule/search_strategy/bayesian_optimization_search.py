@@ -1052,6 +1052,11 @@ class BayOptTuner:
 
 
 class TuningState:
+    """Manages the state and workflow for tuning computational workloads
+
+    This class encapsulates the logic for managing the tuning process of computational workloads, balancing the need
+    to explore new schedules with the efficiency of exploiting known high-performing schedules.
+    """
     def __init__(self,
                  max_trials: int,
                  num_trials_per_iter: int,
