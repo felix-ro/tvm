@@ -1169,6 +1169,37 @@ class TuningState:
 
     def epsilon_greedy_mix(self, exploit_list: List[Schedule], explore_list: List[Schedule],
                            epsilon: float, num: int, fill_missing: bool) -> List[TuningCandidate]:
+        """Mixes exploitation and exploration strategies to select tuning candidates using the epsilon-greedy method.
+
+        Parameters
+        -----------
+        exploit_list: List[tvm.schedule.Schedule]
+            A list of Schedule objects for exploitation (best candidates based on past evaluations).
+        explore_list: List[tvm.schedule.Schedule]
+            A list of Schedule objects for exploration (potentially good candidates not yet evaluated).
+        epsilon: float
+            The probability threshold for choosing exploration over exploitation. A higher epsilon values
+            increase the likelihood of exploring.
+        num: int
+            The total number of TuningCandidate objects to return.
+        fill_missing: bool
+            If True, and if the number of selected candidates is less than 'num', fills the remaining slots
+            with candidates from the exploration list.
+
+        Returns
+        -------
+        mixed_list: List[TuningCandidate]
+            A list of TuningCandidate objects selected based on the epsilon-greedy strategy. Each TuningCandidate
+            is marked as 'measured' if selected from the exploitation list and 'not measured' if selected from
+            the exploration list.
+
+        Background
+        ----------
+        This method aims to balance the exploration of new schedules with the exploitation of known effective
+        schedules. The 'epsilon' parameter controls this balance, with a lower epsilon favoring exploitation and
+        a higher epsilon favoring exploration. If 'fill_missing' is True, and the initial mix does not meet the
+        'num' criteria, additional exploration candidates are added to ensure a full list of candidates.
+        """
         num_explore_schedules = 0
         mixed_list: TuningCandidate = []
         for _ in range(num):
@@ -1326,7 +1357,7 @@ class TuningState:
         num: int
             The number of entries
         """
-        return len(self.database.get_top_k(self.workload, 256))
+        return len(self.database.get_top_k(self.workload, 256))  # ToDo rewrite this properly
 
     def _send_to_bayesian_tuner(self, tune_candidates: List[TuningCandidate]) -> List[Schedule]:
         """Configures the settings with which the Bayesian Optimizer will tune the schedules, and sends them for tuning.
