@@ -33,6 +33,7 @@ import os
 import shutil
 import json
 import time
+import re
 
 from bayes_opt import BayesianOptimization, UtilityFunction
 from bayes_opt.logger import JSONLogger
@@ -241,7 +242,7 @@ def get_num_unique_traces(schedules: List[Schedule]):
 
 
 def create_schedule_from_trace(mod: IRModule, trace: Trace, postprocs: List["Postproc"],
-                               rand_state: np.int64) -> Schedule | None:
+                               rand_state: np.int64, postproc_stats=None) -> Schedule | None:
     """
     Creates a post processed Schedule from a Trace and IRModule
 
@@ -269,7 +270,10 @@ def create_schedule_from_trace(mod: IRModule, trace: Trace, postprocs: List["Pos
     sch.enter_postproc()
 
     for postproc in postprocs:
-        if not postproc.apply(sch):
+        failed = not postproc.apply(sch)
+        if postproc_stats:
+            postproc_stats.enter_result(postproc, failure=failed)
+        if failed:
             return None
     return sch
 
@@ -427,6 +431,43 @@ def get_compute_location_insts(sch: Schedule) -> List[Instruction]:
             compute_location_insts.append(inst)
 
     return compute_location_insts
+
+
+class PostProcessingStatistic:
+    failure_dict: dict = {}
+
+    def enter_result(self, postproc: "Postproc", failure: bool):
+        postproc_name = str(postproc.legacy_repr())
+        postproc_name = re.sub(r'\(.*?\)', '', postproc_name)
+        self.failure_dict[postproc_name] = self.failure_dict.get(postproc_name, 0) + int(failure)
+
+    def log(self, task_name: str, work_dir: str, intro: str):
+        work_dir = os.path.join(work_dir, "logs")
+        task_name = f"{task_name}.log"
+        files = find_file_with_suffix(work_dir, task_name)
+        assert len(files) == 1
+
+        file_path = os.path.join(work_dir, files[0])
+        file_logger = logging.getLogger(task_name)
+        file_logger.setLevel(logging.INFO)
+        file_handler = logging.FileHandler(file_path)
+        formatter = logging.Formatter('%(asctime)s [%(levelname)s] %(message)s')
+        file_handler.setFormatter(formatter)
+        file_logger.addHandler(file_handler)
+
+        message_lines = [f"{intro}"]
+        for index, (postproc_name, num_failures) in enumerate(self.failure_dict.items()):
+            line = f"Postproc #{index} {postproc_name}: {num_failures} failure(s)"
+            message_lines.append(line)
+
+        message = "\n".join(message_lines)
+        file_logger.info(message)
+
+
+def find_file_with_suffix(directory_path, suffix):
+    files = os.listdir(directory_path)
+    matching_files = [file for file in files if file.endswith(suffix)]
+    return matching_files
 
 
 class BayOptTuner:
@@ -1399,6 +1440,7 @@ class TuningState:
         with Profiler.timeit("BayOptSearch/GenerateCandidates/SamplePopulation"):
             output_schedules: List[Schedule] = []
             fail_count: int = 0
+            postproc_stats = PostProcessingStatistic()
             while (fail_count < self.max_fail_count and
                    len(output_schedules) < self.init_min_unmeasured):
 
@@ -1410,7 +1452,8 @@ class TuningState:
                     # 3. Create a schedule from trace
                     sch: Schedule | None = create_schedule_from_trace(mod=self.mod, trace=trace,
                                                                       postprocs=self.postprocs,
-                                                                      rand_state=forkseed(self.rand_state))
+                                                                      rand_state=forkseed(self.rand_state),
+                                                                      postproc_stats=postproc_stats)
                     return sch
 
                 # 4. Sample random traces
@@ -1423,6 +1466,7 @@ class TuningState:
                 # 5. Adjust the number of remaining schedules (in case of failures > 0)
                 num_schedules -= len(output_schedules)
 
+            postproc_stats.log(self.context.task_name, self.work_dir, "Sample Initial Population Summary:")
             logger(logging.INFO, __name__, current_line_number(),
                    f"Sampled {len(output_schedules)} new random schedules")
             return output_schedules
@@ -1440,8 +1484,8 @@ class BayesianOptimizationSearch(PySearchStrategy):
 
     population_size = 1024  # The number of random schedules sampled
     init_measured_ratio = 0.1
-    init_min_unmeasured = 256
-    max_fail_count = 50
+    init_min_unmeasured = 50
+    max_fail_count = 5120
     save_optimizer: bool = True  # Enables optimizer saving; can be overwritten by optimizer phases
     full_first_round_bypass: bool = False  # Do not tune the first 64 schedules for each workload
     validate_schedules: bool = True  # Use this for debugging; set False for benchmark runs
