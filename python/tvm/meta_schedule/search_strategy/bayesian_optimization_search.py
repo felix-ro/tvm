@@ -242,7 +242,7 @@ def get_num_unique_traces(schedules: List[Schedule]):
 
 
 def create_schedule_from_trace(mod: IRModule, trace: Trace, postprocs: List["Postproc"],
-                               rand_state: np.int64, postproc_stats=None) -> Schedule | None:
+                               rand_state: np.int64, postproc_stats: "PostProcessingStatistic") -> Schedule | None:
     """
     Creates a post processed Schedule from a Trace and IRModule
 
@@ -271,8 +271,7 @@ def create_schedule_from_trace(mod: IRModule, trace: Trace, postprocs: List["Pos
 
     for postproc in postprocs:
         failed = not postproc.apply(sch)
-        if postproc_stats:
-            postproc_stats.enter_result(postproc, failure=failed)
+        postproc_stats.enter_result(postproc, failure=failed)
         if failed:
             return None
     return sch
@@ -511,6 +510,7 @@ class BayOptTuner:
         self.path_optimizer_dir: str = self._get_optimizer_dir_path()
         self.optimizer_save_design_space = True
         self.max_optimizer_entries = 500
+        self.postproc_stats = PostProcessingStatistic()
 
         if self.optimizer_logging:
             self._setup_optimizer_dir()
@@ -530,6 +530,7 @@ class BayOptTuner:
             tuning_summary.enter_tuning_report(report)
 
         tuning_summary.log()
+        self.postproc_stats.log(self.context.task_name, current_line_number(), "Tuning Postproc Summary")
         return tuned_schedules
 
     def tune_single_schedule(self, untuned_sch: Schedule, measured: bool) -> Union[Schedule | TuningReport]:
@@ -853,7 +854,8 @@ class BayOptTuner:
 
         # Create a new schedule from the updated trace and return it
         return create_schedule_from_trace(mod=self.mod, trace=trace, postprocs=self.postprocs,
-                                          rand_state=forkseed(self.rand_state))
+                                          rand_state=forkseed(self.rand_state),
+                                          postproc_stats=self.postproc_stats)
 
     def _post_tuning_log_copy(self, tuned_sch: Schedule, untuned_sch: Schedule):
         if self.optimizer_logging and not self.optimizer_save_design_space:
@@ -1036,7 +1038,8 @@ class BayOptTuner:
         trace = trace.change_annotation_in_trace(ann_inst, ann_val)
 
         return create_schedule_from_trace(mod=mod, trace=trace, postprocs=self.postprocs,
-                                          rand_state=forkseed(self.rand_state))
+                                          rand_state=forkseed(self.rand_state),
+                                          postproc_stats=self.postproc_stats)
 
     def _build_decision_dict(self, untuned_sch: Schedule, next_decisions) -> Dict[Instruction, DECISION_TYPE]:
         result_decisions: Dict[Instruction, DECISION_TYPE] = dict()
@@ -1155,7 +1158,7 @@ class TuningState:
                    f"Picked {len(schedules)} schedules from database")
             return schedules
 
-    def _process_database_trace(self, picked_traces) -> List[Schedule]:
+    def _process_database_trace(self, picked_traces: List[Trace]) -> List[Schedule]:
         """Turns a list of database Traces into Schedules
 
         Parameters
@@ -1167,16 +1170,19 @@ class TuningState:
         database_schedules: List[tvm.schedule.Schedule]
             The created database schedules
         """
+        postproc_stats = PostProcessingStatistic()
         database_schedules: List[Schedule] = []
 
         for trace in picked_traces:
             sch: Schedule | None = create_schedule_from_trace(mod=self.mod, trace=trace, postprocs=self.postprocs,
-                                                              rand_state=forkseed(self.rand_state))
+                                                              rand_state=forkseed(self.rand_state),
+                                                              postproc_stats=postproc_stats)
 
             if sch is not None:
                 database_schedules.append(sch)
             else:
                 raise ValueError(f"Could not post-process trace from database:\n{trace}")
+        postproc_stats.log(self.context.task_name, current_line_number(), "Database Postproc Summary")
         return database_schedules
 
     def epsilon_greedy_mix(self, exploit_list: List[Schedule], explore_list: List[Schedule],
@@ -1477,7 +1483,8 @@ class TuningState:
                 fail_count += int(found_new)
                 # 5. Adjust the number of remaining schedules (in case of failures > 0)
                 num_schedules -= len(output_schedules)
-            postproc_stats.log(self.context.task_name, current_line_number(), "Sample Initial Population Summary:")
+            postproc_stats.log(self.context.task_name, current_line_number(),
+                               "Sample Initial Population Postproc Summary:")
             logger(logging.INFO, __name__, current_line_number(),
                    f"Sampled {len(output_schedules)} new random schedules")
             return output_schedules
