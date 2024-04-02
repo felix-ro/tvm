@@ -76,11 +76,21 @@ def current_line_number() -> int:
     return inspect.currentframe().f_back.f_lineno
 
 
-# ToDo rework this function
-def forkseed(rand_state) -> int:
+def forkseed(rand_state: int) -> int:
+    """Creates a new random state from an initial seed
+
+    Parameters
+    ----------
+    rand_state: int
+        The initial random state
+
+    Returns
+    -------
+    new_rand_state: int
+        The new random state
+    """
     rand_state = int(rand_state+random.random()*1999999973)
-    new_rand_state = (rand_state * 32767) % 1999999973
-    return new_rand_state
+    return (rand_state * 32767) % 1999999973
 
 
 # ToDo rework this function
