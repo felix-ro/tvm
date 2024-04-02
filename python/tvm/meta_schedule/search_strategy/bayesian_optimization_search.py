@@ -318,6 +318,25 @@ class TuningReport:
                 message += f"==> {score:.4f} "
         return message
 
+    def analyse_tuning_report(self):
+        # Due to the use of multiprocessing we need to log results outside of tuner.
+        if self.num_tuneable_insts == 0:
+            logger(logging.DEBUG, __name__, current_line_number(),
+                   "No tuneable decision was found in trace")
+        elif self.num_tuneable_insts >= 20:
+            logger(logging.WARN, __name__, current_line_number(),
+                   "Current workload contains more than 20 tuneable instructions." +
+                   "Bayesian Optimization may not be effective.")
+        elif self.tune_failure:
+            logger(logging.DEBUG, __name__, current_line_number(),
+                   "Failed to apply tuning decisions to trace")
+        elif self.optimizer_failure:
+            logger(logging.ERROR, __name__, current_line_number(),
+                   "Optimizer failed to predict next decision")
+        else:
+            message = self.create_tuning_result_message()
+            logger(logging.DEBUG, __name__, current_line_number(), message)
+
 
 class TuningSummary:
     improvements: List[float] = []
@@ -359,26 +378,6 @@ class TuningSummary:
                f"Tuner: Number of Duplicate Points Skipped {self.num_duplicate_points_skipped}")
         logger(logging.INFO, __name__, current_line_number(),
                f"Tuner: Number of Points Probed {self.num_points_probed}")
-
-
-def analyse_tuning_report(tuning_report: TuningReport):
-    # Due to the use of multiprocessing we need to log results outside of tuner.
-    if tuning_report.num_tuneable_insts == 0:
-        logger(logging.DEBUG, __name__, current_line_number(),
-               "No tuneable decision was found in trace")
-    elif tuning_report.num_tuneable_insts >= 20:
-        logger(logging.WARN, __name__, current_line_number(),
-               "Current workload contains more than 20 tuneable instructions." +
-               "Bayesian Optimization may not be effective.")
-    elif tuning_report.tune_failure:
-        logger(logging.DEBUG, __name__, current_line_number(),
-               "Failed to apply tuning decisions to trace")
-    elif tuning_report.optimizer_failure:
-        logger(logging.ERROR, __name__, current_line_number(),
-               "Optimizer failed to predict next decision")
-    else:
-        message = tuning_report.create_tuning_result_message()
-        logger(logging.DEBUG, __name__, current_line_number(), message)
 
 
 def get_compute_location_insts(sch: Schedule) -> List[Instruction]:
@@ -436,7 +435,7 @@ class BayOptTuner:
             sch, report = self.tune_single_schedule(candidate.sch, candidate.measured)
             tuned_schedules.append(sch)
             # 3. Analyse report
-            analyse_tuning_report(tuning_report=report)
+            report.analyse_tuning_report()
             tuning_summary.enter_tuning_report(report)
 
         tuning_summary.log()
@@ -990,7 +989,6 @@ class TuningState:
                  init_min_unmeasured,
                  save_optimizer,
                  max_fail_count,
-                 threaded,
                  full_first_round_bypass,
                  validate_schedules,
                  ):
@@ -1005,7 +1003,6 @@ class TuningState:
         self.init_min_unmeasured = init_min_unmeasured
         self.save_optimizer = save_optimizer
         self.max_fail_count = max_fail_count
-        self.threaded = threaded
         self.full_first_round_bypass: bool = full_first_round_bypass
         self.validate_schedules: bool = validate_schedules
 
@@ -1406,7 +1403,6 @@ class BayesianOptimizationSearch(PySearchStrategy):
     init_measured_ratio = 0.1
     init_min_unmeasured = 256
     max_fail_count = 50
-    threaded: bool = False  # Currently using multiprocessing; performance questionable (high contention somewhere)
     save_optimizer: bool = True  # Enables optimizer saving; can be overwritten by optimizer phases
     full_first_round_bypass: bool = False  # Do not tune the first 64 schedules for each workload
     validate_schedules: bool = True  # Use this for debugging; set False for benchmark runs
@@ -1422,9 +1418,6 @@ class BayesianOptimizationSearch(PySearchStrategy):
         self.context: TuneContext = context
         self.postprocs = context.space_generator.postprocs
         self.rand_state = forkseed(context.rand_state)
-
-        if self.context.num_threads == 1:
-            self.threaded = False
 
     def pre_tuning(
         self,
@@ -1467,7 +1460,6 @@ class BayesianOptimizationSearch(PySearchStrategy):
                                  init_min_unmeasured=self.init_min_unmeasured,
                                  save_optimizer=self.save_optimizer,
                                  max_fail_count=self.max_fail_count,
-                                 threaded=self.threaded,
                                  full_first_round_bypass=self.full_first_round_bypass,
                                  validate_schedules=self.validate_schedules)
 
