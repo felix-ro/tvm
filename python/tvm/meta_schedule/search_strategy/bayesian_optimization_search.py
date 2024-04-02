@@ -441,27 +441,38 @@ class PostProcessingStatistic:
         postproc_name = re.sub(r'\(.*?\)', '', postproc_name)
         self.failure_dict[postproc_name] = self.failure_dict.get(postproc_name, 0) + int(failure)
 
-    def log(self, task_name: str, work_dir: str, intro: str):
-        work_dir = os.path.join(work_dir, "logs")
-        task_name = f"{task_name}.log"
-        files = find_file_with_suffix(work_dir, task_name)
-        assert len(files) == 1
+    def log(self, task_name: str, line_number: int, intro: str):
+        """Logs the postprocessing statistics to the task file
 
-        file_path = os.path.join(work_dir, files[0])
-        file_logger = logging.getLogger(task_name)
-        file_logger.setLevel(logging.INFO)
-        file_handler = logging.FileHandler(file_path)
-        formatter = logging.Formatter('%(asctime)s [%(levelname)s] %(message)s')
-        file_handler.setFormatter(formatter)
-        file_logger.addHandler(file_handler)
+        Parameters
+        ----------
+        task_name: str
+            The name of the task
+        line_number: int
+            The line from which the log was triggered
+        intro: str
+            Description of what the postprocessing statistic is related to (tuning/sampling)
+        """
+        # 1. Get the logger
+        logger_dict = logging.Logger.manager.loggerDict
+        logger_names = list(logger_dict.keys())
+        pattern = fr"tvm\.meta_schedule\.logging\.task_\d+_{task_name}$"
+        matching_strings = [s for s in logger_names if re.match(pattern, s)]
+        assert len(matching_strings) == 1
 
+        # 2. Take the first and only logger, (names are shortened to 100 characters see meta_schedule.logging.py)
+        file_logger_obj = get_logger(matching_strings[0][:100])
+        file_logger = get_logging_func(file_logger_obj)
+
+        # 3. Create message
         message_lines = [f"{intro}"]
         for index, (postproc_name, num_failures) in enumerate(self.failure_dict.items()):
             line = f"Postproc #{index} {postproc_name}: {num_failures} failure(s)"
             message_lines.append(line)
 
+        # 4. Log Message
         message = "\n".join(message_lines)
-        file_logger.info(message)
+        file_logger(logging.INFO, __name__, line_number, message)
 
 
 def find_file_with_suffix(directory_path, suffix):
@@ -1097,7 +1108,6 @@ class TuningState:
         # [st, ed) are the indices of the next batch of candidates.
         self.st: int = 0
         self.ed: int = num_trials_per_iter
-        self.max_fail_count: int = 300
         self.bypass_tuning_no_sample_inst: bool = False
 
         self.workload = database.commit_workload(self.mod)
@@ -1457,16 +1467,17 @@ class TuningState:
                     return sch
 
                 # 4. Sample random traces
+                found_new = False
                 for i in range(num_schedules):
                     sch: Schedule | None = create_random_schedule()
                     if (sch is not None):
                         output_schedules.append(sch)
-                    else:
-                        fail_count += 1
+                        found_new = True
+
+                fail_count += int(found_new)
                 # 5. Adjust the number of remaining schedules (in case of failures > 0)
                 num_schedules -= len(output_schedules)
-
-            postproc_stats.log(self.context.task_name, self.work_dir, "Sample Initial Population Summary:")
+            postproc_stats.log(self.context.task_name, current_line_number(), "Sample Initial Population Summary:")
             logger(logging.INFO, __name__, current_line_number(),
                    f"Sampled {len(output_schedules)} new random schedules")
             return output_schedules
@@ -1484,8 +1495,8 @@ class BayesianOptimizationSearch(PySearchStrategy):
 
     population_size = 1024  # The number of random schedules sampled
     init_measured_ratio = 0.1
-    init_min_unmeasured = 50
-    max_fail_count = 5120
+    init_min_unmeasured = 20
+    max_fail_count = 5
     save_optimizer: bool = True  # Enables optimizer saving; can be overwritten by optimizer phases
     full_first_round_bypass: bool = False  # Do not tune the first 64 schedules for each workload
     validate_schedules: bool = True  # Use this for debugging; set False for benchmark runs
