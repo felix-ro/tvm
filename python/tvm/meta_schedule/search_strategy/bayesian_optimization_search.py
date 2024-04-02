@@ -15,7 +15,6 @@ from ..logging import get_logger, get_logging_func
 from ..profiler import Profiler
 
 from ..cost_model import CostModel
-from ...contrib.popen_pool import PopenPoolExecutor, StatusKind
 
 if TYPE_CHECKING:
     from ..database import Database, TuningRecord
@@ -362,7 +361,7 @@ class TuningSummary:
                f"Tuner: Number of Points Probed {self.num_points_probed}")
 
 
-def analyse_tuning_report(tuning_report: TuningReport, tuning_summary: TuningSummary):
+def analyse_tuning_report(tuning_report: TuningReport):
     # Due to the use of multiprocessing we need to log results outside of tuner.
     if tuning_report.num_tuneable_insts == 0:
         logger(logging.DEBUG, __name__, current_line_number(),
@@ -382,128 +381,6 @@ def analyse_tuning_report(tuning_report: TuningReport, tuning_summary: TuningSum
         logger(logging.DEBUG, __name__, current_line_number(), message)
 
 
-def call_bayopt_parallel(tune_candidates: List[TuningCandidate], num_trials: int,
-                         optimizer_logging: bool, postprocs, threaded: bool, state: "TuningState"):
-    tuned_schedules = []
-    tuning_summary = TuningSummary()
-
-    with Profiler.timeit("BayOptSearch/Tuner/Tune"):
-        if threaded:
-            state.cost_model.save(os.path.join(state.work_dir, "cost_model"))
-            # Here we restart the PopenPool everytime because of a known memory leak issue with the
-            # PopenPool workers after a couple times of usage. We don't apply the same to runners to
-            # avoid potential problem caused by async behaviour.
-            pool = PopenPoolExecutor(
-                max_workers=state.context.num_threads,
-                timeout=None,
-                initializer=None,
-                maximum_process_uses=40
-            )
-
-            # Dispatch the build inputs to the worker processes.
-            for map_result in pool.map_with_error_catching(
-                lambda x: multiprocessing_helper(*x),
-                [
-                    (
-                        state.mod,
-                        candidate.sch.trace.as_json(),
-                        candidate.measured,
-                        num_trials,
-                        optimizer_logging,
-                        postprocs,
-                        state.context,
-                        state.cost_model,
-                        state.work_dir,
-                        state.rand_state,
-                        state.validate_schedules,
-                    )
-                    for candidate in tune_candidates
-                ],
-            ):
-                if map_result.status == StatusKind.COMPLETE:
-                    trace_json, tuning_report = map_result.value
-                    sch = Schedule(mod=state.mod,
-                                   seed=state.rand_state,
-                                   debug_mask=0,
-                                   error_render_level="none",)
-                    Trace.apply_json_to_schedule(trace_json, sch)
-                    tuned_schedules.append(sch)
-                    analyse_tuning_report(tuning_report=tuning_report,
-                                          tuning_summary=None)
-                    tuning_summary.enter_tuning_report(tuning_report)
-                elif map_result.status == StatusKind.EXCEPTION:
-                    print("LocalBuilder: An exception occurred\n" + str(map_result.value))
-                else:
-                    raise ValueError("Unreachable: unexpected result: {map_result}")
-            del pool
-        else:
-            for candidate in tune_candidates:
-                tuned_schedule, tuning_report = thread_helper(state.mod,
-                                                              candidate,
-                                                              num_trials,
-                                                              optimizer_logging,
-                                                              postprocs,
-                                                              state.context,
-                                                              state.cost_model,
-                                                              state.work_dir,
-                                                              state.rand_state,
-                                                              state.validate_schedules)
-                tuned_schedules.append(tuned_schedule)
-                analyse_tuning_report(tuning_report=tuning_report,
-                                      tuning_summary=None)
-                tuning_summary.enter_tuning_report(tuning_report)
-
-    tuning_summary.log()
-    return tuned_schedules
-
-
-def thread_helper(mod: IRModule, candidate: TuningCandidate, num_trials: int, optimizer_logging: bool,
-                  postprocs, context: "TuneContext", cost_model: "CostModel", work_dir: str,
-                  rand_state: np.int64, validate_schedules: bool):
-
-    bay_opt_tuner = BayOptTuner(schedule=candidate.sch,
-                                measured=candidate.measured,
-                                validate_schedules=validate_schedules,
-                                max_trials=num_trials,
-                                optimizer_logging=optimizer_logging,
-                                postprocs=postprocs,
-                                context=context,
-                                cost_model=cost_model,
-                                work_dir=work_dir,
-                                mod=mod,
-                                rand_state=rand_state)
-
-    return bay_opt_tuner.tune()
-
-
-def multiprocessing_helper(mod: IRModule, trace: Trace, measured: bool, num_trials: int, optimizer_logging: bool,
-                           postprocs, context: "TuneContext", cost_model: "CostModel", work_dir: str,
-                           rand_state: np.int64, validate_schedules: bool):
-
-    sch = Schedule(mod=mod,
-                   seed=rand_state,
-                   debug_mask=0,
-                   error_render_level="none",)
-    Trace.apply_json_to_schedule(trace, sch)
-    cost_model = CostModel.create("xgb")
-    cost_model.load(os.path.join(work_dir, "cost_model"))
-
-    bay_opt_tuner = BayOptTuner(schedule=sch,
-                                measured=measured,
-                                validate_schedules=validate_schedules,
-                                max_trials=num_trials,
-                                optimizer_logging=optimizer_logging,
-                                postprocs=postprocs,
-                                context=context,
-                                cost_model=cost_model,
-                                work_dir=work_dir,
-                                mod=mod,
-                                rand_state=rand_state)
-
-    sch, tuning_report = bay_opt_tuner.tune()
-    return sch.trace.as_json(), tuning_report
-
-
 def get_compute_location_insts(sch: Schedule) -> List[Instruction]:
     compute_location_insts = []
 
@@ -516,8 +393,7 @@ def get_compute_location_insts(sch: Schedule) -> List[Instruction]:
 
 class BayOptTuner:
     def __init__(self,
-                 schedule: Schedule,
-                 measured: bool,
+                 tune_candidates: List[TuningCandidate],
                  validate_schedules: bool,
                  max_trials: int,
                  optimizer_logging,
@@ -527,8 +403,7 @@ class BayOptTuner:
                  work_dir,
                  mod,
                  rand_state):
-        self.schedule: Schedule = schedule
-        self.measured: bool = measured
+        self.tune_candidates: List[TuningCandidate] = tune_candidates
         self.context: TuneContext = context
         self.cost_model: CostModel = cost_model
         self.postprocs = postprocs
@@ -542,19 +417,34 @@ class BayOptTuner:
 
         self.log_tuning_traces: bool = False
         self.instruction_decsion_map = dict()
-        self.tuning_report: TuningReport = TuningReport()
         self.possible_annotate_decisions: Dict[str, List[int]] = dict()
         self.path_optimizer_dir: str = self._get_optimizer_dir_path()
         self.optimizer_save_design_space = True
         self.max_optimizer_entries = 500
-        self.tuning_report.measured = self.measured
 
         if self.optimizer_logging:
             self._setup_optimizer_dir()
 
     def tune(self) -> Union[Schedule | TuningReport]:
+        tuning_summary = TuningSummary()
+        tuned_schedules: List[Schedule] = []
+        for candidate in self.tune_candidates:
+            # 1. Initialize tuning report
+            self.tuning_report: TuningReport = TuningReport()
+            self.tuning_report.measured = candidate.measured
+            # 2. Send to tuner
+            sch, report = self.tune_single_schedule(candidate.sch, candidate.measured)
+            tuned_schedules.append(sch)
+            # 3. Analyse report
+            analyse_tuning_report(tuning_report=report)
+            tuning_summary.enter_tuning_report(report)
+
+        tuning_summary.log()
+        return tuned_schedules
+
+    def tune_single_schedule(self, untuned_sch: Schedule, measured: bool) -> Union[Schedule | TuningReport]:
         with Profiler.timeit("BayOptSearch/Tuner/Tune/BayesianPhase"):
-            sch_phase_one: Schedule = self.bayesian_phase(self.schedule)
+            sch_phase_one: Schedule = self.bayesian_phase(untuned_sch, measured)
         with Profiler.timeit("BayOptSearch/Tuner/Tune/ParallelPhase"):
             sch_phase_two: Schedule = self.parallel_phase(sch_phase_one)
         with Profiler.timeit("BayOptSearch/Tuner/Tune/ComputeLocationPhase"):
@@ -707,7 +597,7 @@ class BayOptTuner:
 
         return input_decisions
 
-    def bayesian_phase(self, untuned_sch: Schedule) -> Schedule:
+    def bayesian_phase(self, untuned_sch: Schedule, measured: bool) -> Schedule:
         pre_tuning_score = self._predict_normalized_score(untuned_sch)
         self.tuning_report.pre_tuning_score = pre_tuning_score
         self.tuning_report.last_tuning_score = pre_tuning_score
@@ -809,7 +699,7 @@ class BayOptTuner:
         # If the original schedule was never measured (random schedule), and tuning did not improve
         # its score we return the original schedule. However, if we have already measured the schedule
         # (database schedule) then we will measure the worse one instead of measuring the same one twice
-        if max_target <= pre_tuning_score and not self.measured:
+        if max_target <= pre_tuning_score and not measured:
             self.tuning_report.discarded_tune_schedule = True
             return untuned_sch
 
@@ -1442,8 +1332,17 @@ class TuningState:
         logger(logging.INFO, __name__, current_line_number(),
                f"Sending {num_sch_to_tuner} schedule(s) to bayesian optimization tuner")
 
-        tuned_schedules = call_bayopt_parallel(tune_candidates, num_trials, optimizer_logging,
-                                               self.postprocs, self.threaded, self)
+        bo_tuner = BayOptTuner(tune_candidates=tune_candidates,
+                               validate_schedules=self.validate_schedules,
+                               max_trials=num_trials,
+                               optimizer_logging=optimizer_logging,
+                               postprocs=self.postprocs,
+                               context=self.context,
+                               cost_model=self.cost_model,
+                               work_dir=self.work_dir,
+                               mod=self.mod,
+                               rand_state=self.rand_state)
+        tuned_schedules = bo_tuner.tune()
 
         logger(logging.INFO, __name__, current_line_number(), "Bayesian optimization tuner finished")
         return tuned_schedules
