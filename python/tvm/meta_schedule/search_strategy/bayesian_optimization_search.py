@@ -275,6 +275,8 @@ def create_schedule_from_trace(mod: IRModule, trace: Trace, postprocs: List["Pos
 
 
 class TuningCandidate:
+    """Candidate class for Schedules to be tuned.
+    Keeps track of additional information about a Schedule"""
     sch: Schedule = None
     measured: bool = False
 
@@ -284,10 +286,23 @@ class TuningCandidate:
 
     @staticmethod
     def get_schedules(candidates: List["TuningCandidate"]) -> List[Schedule]:
+        """Returns the Schedules in the TuningCandidates
+
+        Parameters
+        ----------
+        candidates: List[TuneCandidate]
+            The tuning candidates
+
+        Returns
+        -------
+        schedules: List[Schedule]
+            The list of schedules inside the TuneCandidates
+        """
         return [candidate.sch for candidate in candidates]
 
 
 class TuningReport:
+    """Records the tuning progress of a schedule throughout the phases"""
     pre_tuning_score: float = None
     last_tuning_score: float = None
     phase_one_tuning_score: float = None
@@ -303,6 +318,7 @@ class TuningReport:
     measured: bool = False
 
     def create_tuning_result_message(self) -> String:
+        """Creates the debug message showing the score throughout the stages"""
         if self.measured:
             message = "(DB) "
         else:
@@ -319,6 +335,7 @@ class TuningReport:
         return message
 
     def analyse_tuning_report(self):
+        """Analyses and logs the recorded data"""
         # Due to the use of multiprocessing we need to log results outside of tuner.
         if self.num_tuneable_insts == 0:
             logger(logging.DEBUG, __name__, current_line_number(),
@@ -339,6 +356,7 @@ class TuningReport:
 
 
 class TuningSummary:
+    """Aggregates TuningReports into a summary"""
     improvements: List[float] = []
     best_score: float = 0.0
     num_tune_failures: int = 0
@@ -347,6 +365,13 @@ class TuningSummary:
     num_points_probed: int = 0
 
     def enter_tuning_report(self, tuning_report: TuningReport):
+        """Enter a TuningReport into the summary
+
+        Parameters
+        ----------
+        tuning_report: TuningReport
+            The TuningReport to enter
+        """
         if tuning_report.tune_failure:
             self.num_tune_failures += 1
         elif tuning_report.optimizer_failure:
@@ -360,12 +385,14 @@ class TuningSummary:
         self.num_points_probed += tuning_report.num_points_probed
 
     def get_avg_improvement(self):
+        """Calulates the average improvement over the recorded reports"""
         if len(self.improvements) > 0:
             return sum(self.improvements) / len(self.improvements)
         else:
             return 0
 
     def log(self):
+        """Logs the summary to INFO"""
         logger(logging.INFO, __name__, current_line_number(),
                f"Tuner: Schedule cost model score improved by an average of {self.get_avg_improvement():.4f}")
         logger(logging.INFO, __name__, current_line_number(),
@@ -381,6 +408,18 @@ class TuningSummary:
 
 
 def get_compute_location_insts(sch: Schedule) -> List[Instruction]:
+    """Extracts a list of compute location instructions from a Schedule
+
+    Parameters
+    ----------
+    sch: tvm.schedule.Schedule
+        The input schedule
+
+    Returns
+    -------
+    comp_loc_insts: tvm.tir.Instruction
+        The compute location intstructions in the schedule
+    """
     compute_location_insts = []
 
     for inst in sch.trace.insts:
