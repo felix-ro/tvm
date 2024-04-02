@@ -234,6 +234,11 @@ def get_possible_tiling_decisions(tile_product: int, num_tiles: int, max_innterm
         return list(unique_combinations)
 
 
+def remove_duplicate_schedules(schedules: List[Schedule]) -> List[Schedule]:
+    unique_schedules_dict = {str(sch.trace.simplified(remove_postproc=False)): sch for sch in schedules}
+    return list(unique_schedules_dict.values())
+
+
 def get_num_unique_traces(schedules: List[Schedule]):
     """Returns the number unique Traces in a list of Schedules
 
@@ -376,6 +381,7 @@ class TuningSummary:
     num_optimizer_failures: int = 0
     num_duplicate_points_skipped: int = 0
     num_points_probed: int = 0
+    num_discarded_tune_schedules: int = 0
 
     def enter_tuning_report(self, tuning_report: TuningReport):
         """Enter a TuningReport into the summary
@@ -389,6 +395,8 @@ class TuningSummary:
             self.num_tune_failures += 1
         elif tuning_report.optimizer_failure:
             self.num_optimizer_failures += 1
+        elif tuning_report.discarded_tune_schedule:
+            self.num_discarded_tune_schedules += 1
         elif tuning_report.pre_tuning_score and tuning_report.last_tuning_score:
             self.improvements.append(tuning_report.last_tuning_score - tuning_report.pre_tuning_score)
             if tuning_report.last_tuning_score > self.best_score:
@@ -407,17 +415,19 @@ class TuningSummary:
     def log(self):
         """Logs the summary to INFO"""
         logger(logging.INFO, __name__, current_line_number(),
-               f"Tuner: Schedule cost model score improved by an average of {self.get_avg_improvement():.4f}")
+               f"[Tuner] Schedule cost model score improved by an average of: {self.get_avg_improvement():.4f}")
         logger(logging.INFO, __name__, current_line_number(),
-               f"Tuner: Best Score {self.best_score:.4f}")
+               f"[Tuner] Best Score: {self.best_score:.4f}")
         logger(logging.INFO, __name__, current_line_number(),
-               f"Tuner: Number of Tune Failures {self.num_tune_failures}")
+               f"[Tuner] Number of Tune Failures: {self.num_tune_failures}")
         logger(logging.INFO, __name__, current_line_number(),
-               f"Tuner: Number of Optimizer Failures {self.num_optimizer_failures}")
+               f"[Tuner] Number of Discarded Tuned Schedules: {self.num_discarded_tune_schedules}")
         logger(logging.INFO, __name__, current_line_number(),
-               f"Tuner: Number of Duplicate Points Skipped {self.num_duplicate_points_skipped}")
+               f"[Tuner] Number of Optimizer Failures: {self.num_optimizer_failures}")
         logger(logging.INFO, __name__, current_line_number(),
-               f"Tuner: Number of Points Probed {self.num_points_probed}")
+               f"[Tuner] Number of Duplicate Points Skipped: {self.num_duplicate_points_skipped}")
+        logger(logging.INFO, __name__, current_line_number(),
+               f"[Tuner] Number of Points Probed: {self.num_points_probed}")
 
 
 def get_compute_location_insts(sch: Schedule) -> List[Instruction]:
@@ -521,6 +531,8 @@ class BayOptTuner:
         self.optimizer_save_design_space = True
         self.max_optimizer_entries = 500
         self.postproc_stats = PostProcessingStatistic()
+        self.max_failures = 5000
+        self.max_sch_failure = self.max_failures / len(self.tune_candidates)
 
         if self.optimizer_logging:
             self._setup_optimizer_dir()
@@ -745,8 +757,10 @@ class BayOptTuner:
         max_decisions: dict = None
 
         current_trial: int = 0
+        failure_count: int = 0
         start_time = time.time()
-        while (current_trial < self.max_trials and time.time() - start_time < 10):
+        while (current_trial < self.max_trials and failure_count < self.max_sch_failure
+               and time.time() - start_time < 10):
             # Get the a list of decisions for the entered pbounds
             new_decision = False
             next_decisions = None
@@ -769,7 +783,7 @@ class BayOptTuner:
             sch: Schedule = self._get_schedule_with_predicted_decisons(untuned_sch, next_decisions)
 
             if sch is None:
-                current_trial += 1
+                failure_count += 1
                 continue
 
             # predict schedule score
@@ -802,6 +816,10 @@ class BayOptTuner:
         # (database schedule) then we will measure the worse one instead of measuring the same one twice
         if max_target <= pre_tuning_score and not measured:
             self.tuning_report.discarded_tune_schedule = True
+            return untuned_sch
+
+        if max_decisions is None:
+            self.tuning_report.tune_failure = True
             return untuned_sch
 
         # Save the tuning score
@@ -1334,23 +1352,30 @@ class TuningState:
         if (len(unmeasured_schedules) < self.init_min_unmeasured):
             raise ValueError("Could not sample a sufficient number of random schedules")
 
+        # 8. Remove duplicates
+        unmeasured_schedules = remove_duplicate_schedules(unmeasured_schedules)
+
         logger(logging.INFO, __name__, current_line_number(),
                f"Prepared a population of {len(measured_schedules) + len(unmeasured_schedules)} " +
                "schedules for selection")
 
-        # 8. Pick the random and untuned schedules for running (prevent cost model from overfitting)
+        # 9. Pick the random and untuned schedules for running (prevent cost model from overfitting)
         random_candidates: List[TuningCandidate] = self.epsilon_greedy_mix(exploit_list=[],
                                                                            explore_list=unmeasured_schedules,
                                                                            epsilon=0.2,
                                                                            num=sample_num,
                                                                            fill_missing=False)
 
-        # 9. Get the best schedules from population
-        best_unmeasured_schedules, _ = get_top_k_schedules(self.context, self.cost_model, unmeasured_schedules, 32)
+        # 10. Get the best schedules from population
+        best_unmeasured_schedules, _ = get_top_k_schedules(self.context, self.cost_model,
+                                                           unmeasured_schedules, sample_num)
 
-        # 10. Pick a mix of measured schedules and unmeasured for tuning.
+        # 11. Pick a mix of measured schedules and unmeasured for tuning.
         #     The number of schedules send to the tuner is decided by how many random
         #     schedules were selected for direct measurement.
+        max_num_tune_schs = len(measured_schedules) + len(best_unmeasured_schedules)
+        if max_num_tune_schs < sample_num:
+            sample_num = max_num_tune_schs + len(random_candidates)
         tune_candidates: List[TuningCandidate] = self.epsilon_greedy_mix(exploit_list=measured_schedules,
                                                                          explore_list=best_unmeasured_schedules,
                                                                          epsilon=0.4,
@@ -1363,18 +1388,18 @@ class TuningState:
             logger(logging.INFO, __name__, current_line_number(),
                    f"Tuner set includes {get_num_unique_traces(tune_schs)} unique schedule(s)")
 
-        # 11. Sometimes it can make sense to bypass the tuner and prepare the sampled schedules for running immediatley
+        # 12. Sometimes it can make sense to bypass the tuner and prepare the sampled schedules for running immediatley
         #     Possible reasons include: design spaces don't have sample instructions, or first round bypass
         if self.bypass_tuning_no_sample_inst or first_iter_bypass:
             run_schedules = TuningCandidate.get_schedules(random_candidates) + \
                             TuningCandidate.get_schedules(tune_candidates)
         else:
-            # 12. Send the tuning candidates to the tuner
+            # 13. Send the tuning candidates to the tuner
             tuned_schedules: List[Schedule] = self._send_to_bayesian_tuner(tune_candidates)
             run_schedules = TuningCandidate.get_schedules(random_candidates) + tuned_schedules
 
         assert len(run_schedules) == sample_num
-        # 13. Assemble the measurement candidates
+        # 14. Assemble the measurement candidates
         return assemble_candidates(run_schedules)
 
     def _get_num_workload_entries(self) -> int:
