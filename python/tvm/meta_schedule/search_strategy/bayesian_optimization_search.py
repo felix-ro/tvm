@@ -524,11 +524,11 @@ class BayOptTuner:
         self.rand_state: int = rand_state
 
         self.log_tuning_traces: bool = False
-        self.instruction_decsion_map = dict()
-        self.possible_annotate_decisions: Dict[str, List[int]] = dict()
+        self.instruction_decsion_map: dict = dict()
+        self.possible_annotate_decisions: dict[str, List[int]] = dict()
         self.path_optimizer_dir: str = self._get_optimizer_dir_path()
-        self.optimizer_save_design_space = True
-        self.max_optimizer_entries = 250
+        self.optimizer_save_design_space: bool = True
+        self.max_optimizer_entries: int = 250
         self.postproc_stats = PostProcessingStatistic()
         self.max_failures: int = 5000
         self.max_sch_failure: int = int(self.max_failures / len(self.tune_candidates))
