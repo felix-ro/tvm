@@ -1406,6 +1406,9 @@ class TuningState:
                f"Prepared a population of {len(measured_schedules) + len(unmeasured_schedules)} " +
                "schedules for selection")
 
+        max_num_tune_schs = len(measured_schedules) + len(unmeasured_schedules)
+        sample_num = min(max_num_tune_schs, sample_num)
+
         # 9. Pick the random and untuned schedules for running (prevent cost model from overfitting)
         random_candidates: List[TuningCandidate] = self.epsilon_greedy_mix(exploit_list=[],
                                                                            explore_list=unmeasured_schedules,
@@ -1420,10 +1423,6 @@ class TuningState:
         # 11. Pick a mix of measured schedules and unmeasured for tuning.
         #     The number of schedules send to the tuner is decided by how many random
         #     schedules were selected for direct measurement.
-        max_num_tune_schs = len(measured_schedules) + len(best_unmeasured_schedules)
-        if max_num_tune_schs < sample_num:
-            sample_num = max_num_tune_schs + len(random_candidates)
-
         # Alternative implementation (contains duplicates)
         # tune_candidates: List[TuningCandidate] = self.epsilon_greedy_mix(exploit_list=measured_schedules,
         #                                                                  explore_list=best_unmeasured_schedules,
