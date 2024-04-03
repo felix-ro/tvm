@@ -515,24 +515,23 @@ class BayOptTuner:
         self.tune_candidates: List[TuningCandidate] = tune_candidates
         self.context: TuneContext = context
         self.cost_model: CostModel = cost_model
-        self.postprocs = postprocs
+        self.postprocs: "Postproc" = postprocs
         self.validate_schedules: bool = validate_schedules
         self.max_trials: int = max_trials
         self.optimizer_logging: bool = optimizer_logging
-        self.context = context
-        self.work_dir = work_dir
-        self.mod = mod
-        self.rand_state = rand_state
+        self.work_dir: str = work_dir
+        self.mod: IRModule = mod
+        self.rand_state: int = rand_state
 
         self.log_tuning_traces: bool = False
         self.instruction_decsion_map = dict()
         self.possible_annotate_decisions: Dict[str, List[int]] = dict()
         self.path_optimizer_dir: str = self._get_optimizer_dir_path()
         self.optimizer_save_design_space = True
-        self.max_optimizer_entries = 500
+        self.max_optimizer_entries = 250
         self.postproc_stats = PostProcessingStatistic()
-        self.max_failures = 5000
-        self.max_sch_failure = self.max_failures / len(self.tune_candidates)
+        self.max_failures: int = 5000
+        self.max_sch_failure: int = int(self.max_failures / len(self.tune_candidates))
 
         if self.optimizer_logging:
             self._setup_optimizer_dir()
