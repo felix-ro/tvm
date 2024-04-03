@@ -1246,7 +1246,7 @@ class TuningState:
         'num' criteria, additional exploration candidates are added to ensure a full list of candidates.
         """
         num_explore_schedules = 0
-        mixed_list: TuningCandidate = []
+        mixed_list: List[TuningCandidate] = []
         for _ in range(num):
             if random.random() > epsilon:  # Exploitation
                 if exploit_list:  # Check if the list is not empty
@@ -1272,6 +1272,46 @@ class TuningState:
             logger(logging.INFO, __name__, current_line_number(),
                    f"Epsilon Greedy mixed {len(mixed_list)} random schedules into runner set")
         return mixed_list
+
+    def epsilon_greedy_no_duplicates(self, exploit_list: List[Schedule], explore_list: List[Schedule],
+                                     epsilon: float, num: int) -> List[TuningCandidate]:
+        """A different approach to mixing the explore and exploit list avoiding duplicates and taking the top
+        schedules if the lists are sorted by descending order.
+
+        Parameters
+        ----------
+        exploit_list: List[tvm.schedule.Schedule]
+            The list to pick the exploit Schedules from
+        explore_list: List[tvm.schedule.Schedule]
+            The list to pick the explore Schedules from
+        epsilon: float
+            The probability threshold for choosing exploration over exploitation. A higher epsilon values
+            increase the likelihood of exploring.
+        num: int
+            The total number of TuningCandidate objects to return.
+
+        Returns
+        -------
+        tuning_candidates: List[TuningCandidate]
+            The mixed list of TuningCandidates
+        """
+        if len(exploit_list) == 0:
+            num_unmeasured = num
+            num_measured = 0
+        else:
+            num_measured = int(num * (1 - epsilon))
+            num_unmeasured = num - num_measured
+
+        selected_measured = [TuningCandidate(sch, True) for sch in exploit_list[:num_measured]]
+        selected_unmeasured = [TuningCandidate(sch, False) for sch in explore_list[:num_unmeasured]]
+
+        tune_candidates: List[TuningCandidate] = []
+        tune_candidates.extend(selected_measured)
+        tune_candidates.extend(selected_unmeasured)
+
+        assert len(tune_candidates) == num
+
+        return tune_candidates
 
     @staticmethod
     def _has_sample_instruction(traces: List[Trace]) -> bool:
@@ -1328,7 +1368,7 @@ class TuningState:
         measured_schedules: List[Schedule] = []
         if num_workload_db_entries >= 128:
             # Get the top 32 measured schedules in the database
-            measured_schedules = self._pick_best_from_database(32)
+            measured_schedules = self._pick_best_from_database(64)
 
         # 5. The XGB cost model will give random predictions if the workload does not have
         #    atleast 64 hardware measurement results. Therefore, it can be time efficient to
@@ -1375,11 +1415,20 @@ class TuningState:
         max_num_tune_schs = len(measured_schedules) + len(best_unmeasured_schedules)
         if max_num_tune_schs < sample_num:
             sample_num = max_num_tune_schs + len(random_candidates)
-        tune_candidates: List[TuningCandidate] = self.epsilon_greedy_mix(exploit_list=measured_schedules,
-                                                                         explore_list=best_unmeasured_schedules,
-                                                                         epsilon=0.4,
-                                                                         num=sample_num - len(random_candidates),
-                                                                         fill_missing=True)
+
+        # Alternative implementation (contains duplicates)
+        # tune_candidates: List[TuningCandidate] = self.epsilon_greedy_mix(exploit_list=measured_schedules,
+        #                                                                  explore_list=best_unmeasured_schedules,
+        #                                                                  epsilon=0.4,
+        #                                                                  num=sample_num - len(random_candidates),
+        #                                                                  fill_missing=True)
+
+        tune_candidates: List[TuningCandidate] = self.epsilon_greedy_no_duplicates(
+            exploit_list=measured_schedules,
+            explore_list=best_unmeasured_schedules,
+            epsilon=0.4,
+            num=sample_num - len(random_candidates)
+        )
 
         if self.validate_schedules:
             tune_schs = TuningCandidate.get_schedules(tune_candidates)
