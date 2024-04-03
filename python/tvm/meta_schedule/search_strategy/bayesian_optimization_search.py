@@ -358,7 +358,7 @@ class TuningReport:
         if self.num_tuneable_insts == 0:
             logger(logging.DEBUG, __name__, current_line_number(),
                    "No tuneable decision was found in trace")
-        elif self.num_tuneable_insts >= 20:
+        elif self.num_tuneable_insts and self.num_tuneable_insts >= 20:
             logger(logging.WARN, __name__, current_line_number(),
                    "Current workload contains more than 20 tuneable instructions." +
                    "Bayesian Optimization may not be effective.")
@@ -511,7 +511,8 @@ class BayOptTuner:
                  cost_model,
                  work_dir,
                  mod,
-                 rand_state):
+                 rand_state,
+                 only_tune_parallel_extent):
         self.tune_candidates: List[TuningCandidate] = tune_candidates
         self.context: TuneContext = context
         self.cost_model: CostModel = cost_model
@@ -532,6 +533,8 @@ class BayOptTuner:
         self.postproc_stats = PostProcessingStatistic()
         self.max_failures: int = 5000
         self.max_sch_failure: int = int(self.max_failures / len(self.tune_candidates))
+
+        self.only_tune_parallel_extent = only_tune_parallel_extent
 
         if self.optimizer_logging:
             self._setup_optimizer_dir()
@@ -555,14 +558,22 @@ class BayOptTuner:
         return tuned_schedules
 
     def tune_single_schedule(self, untuned_sch: Schedule, measured: bool) -> Union[Schedule | TuningReport]:
-        with Profiler.timeit("BayOptSearch/Tuner/Tune/BayesianPhase"):
-            sch_phase_one: Schedule = self.bayesian_phase(untuned_sch, measured)
-        with Profiler.timeit("BayOptSearch/Tuner/Tune/ParallelPhase"):
-            sch_phase_two: Schedule = self.parallel_phase(sch_phase_one)
-        with Profiler.timeit("BayOptSearch/Tuner/Tune/ComputeLocationPhase"):
-            sch_phase_three: Schedule = self.compute_location_phase(sch_phase_two)
+        pre_tuning_score = self._predict_normalized_score(untuned_sch)
+        self.tuning_report.pre_tuning_score = pre_tuning_score
+        self.tuning_report.last_tuning_score = pre_tuning_score
 
-        return sch_phase_three, self.tuning_report
+        if self.only_tune_parallel_extent:
+            with Profiler.timeit("BayOptSearch/Tuner/Tune/ParallelPhase"):
+                finished_sch: Schedule = self.parallel_phase(untuned_sch)
+        else:
+            with Profiler.timeit("BayOptSearch/Tuner/Tune/BayesianPhase"):
+                sch_phase_one: Schedule = self.bayesian_phase(untuned_sch, measured)
+            with Profiler.timeit("BayOptSearch/Tuner/Tune/ParallelPhase"):
+                sch_phase_two: Schedule = self.parallel_phase(sch_phase_one)
+            with Profiler.timeit("BayOptSearch/Tuner/Tune/ComputeLocationPhase"):
+                finished_sch: Schedule = self.compute_location_phase(sch_phase_two)
+
+        return finished_sch, self.tuning_report
 
     def compute_location_phase(self, sch: Schedule):
         MAX_CANDIDATES = 64
@@ -710,9 +721,6 @@ class BayOptTuner:
         return input_decisions
 
     def bayesian_phase(self, untuned_sch: Schedule, measured: bool) -> Schedule:
-        pre_tuning_score = self._predict_normalized_score(untuned_sch)
-        self.tuning_report.pre_tuning_score = pre_tuning_score
-        self.tuning_report.last_tuning_score = pre_tuning_score
         pbounds = self._get_parameters(untuned_sch=untuned_sch)
 
         # Check the number of tuneable instructions
@@ -740,7 +748,7 @@ class BayOptTuner:
         # good result in the beginning.
         input_decisions = self._get_decisions(sch=untuned_sch)
         try:
-            optimizer.register(params=input_decisions, target=pre_tuning_score)
+            optimizer.register(params=input_decisions, target=self.tuning_report.pre_tuning_score)
             discrete_points_registered[str(list(input_decisions.values()))] = None
         except NotUniqueError:
             pass
@@ -813,7 +821,7 @@ class BayOptTuner:
         # If the original schedule was never measured (random schedule), and tuning did not improve
         # its score we return the original schedule. However, if we have already measured the schedule
         # (database schedule) then we will measure the worse one instead of measuring the same one twice
-        if max_target <= pre_tuning_score and not measured:
+        if max_target <= self.tuning_report.pre_tuning_score and not measured:
             self.tuning_report.discarded_tune_schedule = True
             return untuned_sch
 
@@ -1493,10 +1501,11 @@ class TuningState:
 
         num_trials = 0
         optimizer_logging = False
+        only_tune_parallel_extent = False
         if num_workload_db_entries < 64:
             # XGB Cost Model is not yet accurate
             num_trials = 1
-            optimizer_logging = False
+            only_tune_parallel_extent = True
         elif num_workload_db_entries < 256:
             num_trials = 10
             optimizer_logging = self.save_optimizer
@@ -1517,7 +1526,8 @@ class TuningState:
                                cost_model=self.cost_model,
                                work_dir=self.work_dir,
                                mod=self.mod,
-                               rand_state=self.rand_state)
+                               rand_state=self.rand_state,
+                               only_tune_parallel_extent=only_tune_parallel_extent)
         tuned_schedules = bo_tuner.tune()
 
         logger(logging.INFO, __name__, current_line_number(), "Bayesian optimization tuner finished")
