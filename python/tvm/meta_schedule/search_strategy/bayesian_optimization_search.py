@@ -1328,9 +1328,9 @@ class TuningState:
                    f"Epsilon Greedy mixed {len(mixed_list)} random schedules into runner set")
         return mixed_list
 
-    def epsilon_greedy_no_duplicates(self, exploit_list: List[Schedule], explore_list: List[Schedule],
-                                     epsilon: float, num: int) -> List[TuningCandidate]:
-        """A different approach to mixing the explore and exploit list avoiding duplicates and taking the top
+    def epsilon_greedy_only_top(self, exploit_list: List[Schedule], explore_list: List[Schedule],
+                                epsilon: float, num: int) -> List[TuningCandidate]:
+        """A different approach to mixing the explore and exploit list taking the top
         schedules if the lists are sorted by descending order.
 
         Parameters
@@ -1478,7 +1478,7 @@ class TuningState:
         #                                                                  num=sample_num - len(random_candidates),
         #                                                                  fill_missing=True)
 
-        tune_candidates: List[TuningCandidate] = self.epsilon_greedy_no_duplicates(
+        tune_candidates: List[TuningCandidate] = self.epsilon_greedy_only_top(
             exploit_list=measured_schedules,
             explore_list=best_unmeasured_schedules,
             epsilon=0.4,
