@@ -334,8 +334,8 @@ class TuningReport:
     num_points_probed: int = 0
 
     def __init__(self, measured: bool, is_gpu_target: bool):
-        self.measured = measured
-        self.is_gpu_target = is_gpu_target
+        self.measured: bool = measured
+        self.is_gpu_target: bool = is_gpu_target
 
     def create_tuning_result_message(self) -> String:
         """Creates the debug message showing the score throughout the stages"""
@@ -382,13 +382,15 @@ class TuningReport:
 
 class TuningSummary:
     """Aggregates TuningReports into a summary"""
-    improvements: List[float] = []
     best_score: float = 0.0
     num_tune_failures: int = 0
     num_optimizer_failures: int = 0
     num_duplicate_points_skipped: int = 0
     num_points_probed: int = 0
     num_discarded_tune_schedules: int = 0
+
+    def __init__(self):
+        self.improvements: List[float] = []
 
     def enter_tuning_report(self, tuning_report: TuningReport):
         """Enter a TuningReport into the summary
