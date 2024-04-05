@@ -32,7 +32,6 @@ import hashlib
 import os
 import shutil
 import json
-import time
 import re
 
 from bayes_opt import BayesianOptimization, UtilityFunction
@@ -778,9 +777,7 @@ class BayOptTuner:
 
         current_trial: int = 0
         failure_count: int = 0
-        start_time = time.time()
-        while (current_trial < self.max_trials and failure_count < self.max_sch_failure
-               and time.time() - start_time < 10):
+        while (current_trial < self.max_trials and failure_count < self.max_sch_failure):
             # Get the a list of decisions for the entered pbounds
             new_decision = False
             next_decisions = None
