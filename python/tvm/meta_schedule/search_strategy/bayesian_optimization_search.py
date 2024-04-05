@@ -462,10 +462,21 @@ def get_compute_location_insts(sch: Schedule) -> List[Instruction]:
 
 
 class PostProcessingStatistic:
+    """Post processors validate if a schedule fulfills all constraints. This class can be used
+    to aggregate data on post processing failures."""
     def __init__(self):
         self.failure_dict: dict = dict()
 
     def enter_result(self, postproc: "Postproc", failure: bool):
+        """Enter the postprocessing result into the statistic
+
+        Parameters
+        ----------
+        postproc: tvm.meta_schedule.Postproc
+            The post processor
+        failure: bool
+            If the post processor failed
+        """
         postproc_name = str(postproc.legacy_repr())
         postproc_name = re.sub(r'\(.*?\)', '', postproc_name)
         self.failure_dict[postproc_name] = self.failure_dict.get(postproc_name, 0) + int(failure)
@@ -504,7 +515,21 @@ class PostProcessingStatistic:
         file_logger(logging.INFO, __name__, line_number, message)
 
 
-def find_file_with_suffix(directory_path, suffix):
+def find_file_with_suffix(directory_path: str, suffix: str) -> List[str]:
+    """Searches for a file in a directory that ends with a given suffix
+
+    Parameters
+    ----------
+    directory_path: str
+        The path of the directory to search in
+    suffix: str
+        The suffix to search for
+
+    Returns
+    -------
+    matching_files: List[str]
+        A list of file names that match the suffix
+    """
     files = os.listdir(directory_path)
     matching_files = [file for file in files if file.endswith(suffix)]
     return matching_files
