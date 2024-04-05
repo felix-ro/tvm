@@ -864,6 +864,8 @@ class BayOptTuner:
 
         if max_decisions is None:
             self.tuning_report.tune_failure = True
+            logger(logging.DEBUG, __name__, current_line_number(),
+                   f"Experienced {failure_count} falure(s) and did not find a viable schedule")
             return untuned_sch
 
         # Save the tuning score
@@ -1295,13 +1297,19 @@ class TuningState:
         num_explore_schedules = 0
         mixed_list: List[TuningCandidate] = []
         for _ in range(num):
-            if random.random() > epsilon:  # Exploitation
-                if exploit_list:  # Check if the list is not empty
-                    candidate = TuningCandidate(sch=random.choice(exploit_list), measured=True)
+            if random.random() > epsilon:
+                # Pick exploitation schedule
+                if exploit_list:
+                    index = sample_int(self.rand_state, 0, len(exploit_list))
+                    candidate = TuningCandidate(sch=exploit_list[index], measured=True)
+                    exploit_list.pop(index)
                     mixed_list.append(candidate)
-            else:  # Exploration
+            else:
+                # Pick exploration schedule
                 if explore_list:
-                    candidate = TuningCandidate(sch=random.choice(explore_list), measured=False)
+                    index = sample_int(self.rand_state, 0, len(exploit_list))
+                    candidate = TuningCandidate(sch=explore_list[index], measured=False)
+                    explore_list.pop(index)
                     mixed_list.append(candidate)
                     num_explore_schedules += 1
 
