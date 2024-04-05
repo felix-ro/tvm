@@ -565,7 +565,7 @@ class BayOptTuner:
         self.possible_annotate_decisions: dict[str, List[int]] = dict()
         self.path_optimizer_dir: str = self._get_optimizer_dir_path()
         self.optimizer_save_design_space: bool = True
-        self.max_optimizer_entries: int = 750
+        self.max_optimizer_entries: int = 500
         self.postproc_stats = PostProcessingStatistic()
         self.max_failures: int = 5000
         self.max_sch_failure: int = int(self.max_failures / len(self.tune_candidates))
@@ -1299,14 +1299,14 @@ class TuningState:
         for _ in range(num):
             if random.random() > epsilon:
                 # Pick exploitation schedule
-                if exploit_list:
+                if len(exploit_list) > 0:
                     index = sample_int(self.rand_state, 0, len(exploit_list))
                     candidate = TuningCandidate(sch=exploit_list[index], measured=True)
                     exploit_list.pop(index)
                     mixed_list.append(candidate)
             else:
                 # Pick exploration schedule
-                if explore_list:
+                if len(explore_list) > 0:
                     index = sample_int(self.rand_state, 0, len(exploit_list))
                     candidate = TuningCandidate(sch=explore_list[index], measured=False)
                     explore_list.pop(index)
