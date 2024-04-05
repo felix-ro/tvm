@@ -423,7 +423,7 @@ def get_vtcm_compaction_passes() -> List[tvm.transform.Pass]:
 
 
 def is_annotate_with_parallel(inst: Instruction) -> bool:
-    """Check if the instruction is annotation with `meta_schedule_parallel`
+    """Check if the instruction is annotation with `meta_schedule.parallel`
 
     Parameters
     ----------
@@ -433,7 +433,7 @@ def is_annotate_with_parallel(inst: Instruction) -> bool:
     Returns
     -------
     annotated: bool
-        Whether the instruction is annotation with `meta_schedule_parallel`
+        Whether the instruction is annotation with `meta_schedule.parallel`
     """
     return _ffi_api.is_annotate_with_parallel(inst)  # type: ignore # pylint: disable=no-member
 

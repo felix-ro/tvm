@@ -333,10 +333,18 @@ class TuningReport:
     num_tuneable_insts: int = None
     num_duplicate_points_skipped: int = 0
     num_points_probed: int = 0
-    measured: bool = False
+
+    def __init__(self, measured: bool, is_gpu_target: bool):
+        self.measured = measured
+        self.is_gpu_target = is_gpu_target
 
     def create_tuning_result_message(self) -> String:
         """Creates the debug message showing the score throughout the stages"""
+        if self.is_gpu_target:
+            scores = [self.phase_one_tuning_score]
+        else:
+            scores = [self.phase_one_tuning_score, self.phase_two_tuning_score, self.phase_three_tuning_score]
+
         if self.measured:
             message = "(DB) "
         else:
@@ -345,7 +353,7 @@ class TuningReport:
         if self.pre_tuning_score:
             message += f"{self.pre_tuning_score:.4f} "
 
-        for score in [self.phase_one_tuning_score, self.phase_two_tuning_score, self.phase_three_tuning_score]:
+        for score in scores:
             if not score:
                 message += "==> discarded "
             else:
@@ -453,7 +461,8 @@ def get_compute_location_insts(sch: Schedule) -> List[Instruction]:
 
 
 class PostProcessingStatistic:
-    failure_dict: dict = {}
+    def __init__(self):
+        self.failure_dict: dict = dict()
 
     def enter_result(self, postproc: "Postproc", failure: bool):
         postproc_name = str(postproc.legacy_repr())
@@ -512,7 +521,8 @@ class BayOptTuner:
                  work_dir,
                  mod,
                  rand_state,
-                 only_tune_parallel_extent):
+                 only_tune_parallel_extent,
+                 is_gpu_target):
         self.tune_candidates: List[TuningCandidate] = tune_candidates
         self.context: TuneContext = context
         self.cost_model: CostModel = cost_model
@@ -529,12 +539,13 @@ class BayOptTuner:
         self.possible_annotate_decisions: dict[str, List[int]] = dict()
         self.path_optimizer_dir: str = self._get_optimizer_dir_path()
         self.optimizer_save_design_space: bool = True
-        self.max_optimizer_entries: int = 250
+        self.max_optimizer_entries: int = 750
         self.postproc_stats = PostProcessingStatistic()
         self.max_failures: int = 5000
         self.max_sch_failure: int = int(self.max_failures / len(self.tune_candidates))
 
         self.only_tune_parallel_extent = only_tune_parallel_extent
+        self.is_gpu_target = is_gpu_target
 
         if self.optimizer_logging:
             self._setup_optimizer_dir()
@@ -544,8 +555,7 @@ class BayOptTuner:
         tuned_schedules: List[Schedule] = []
         for candidate in self.tune_candidates:
             # 1. Initialize tuning report
-            self.tuning_report: TuningReport = TuningReport()
-            self.tuning_report.measured = candidate.measured
+            self.tuning_report: TuningReport = TuningReport(candidate.measured, self.is_gpu_target)
             # 2. Send to tuner
             sch, report = self.tune_single_schedule(candidate.sch, candidate.measured)
             tuned_schedules.append(sch)
@@ -562,7 +572,10 @@ class BayOptTuner:
         self.tuning_report.pre_tuning_score = pre_tuning_score
         self.tuning_report.last_tuning_score = pre_tuning_score
 
-        if self.only_tune_parallel_extent:
+        if self.is_gpu_target:
+            with Profiler.timeit("BayOptSearch/Tuner/Tune/BayesianPhase"):
+                finished_sch: Schedule = self.bayesian_phase(untuned_sch, measured)
+        elif self.only_tune_parallel_extent:
             with Profiler.timeit("BayOptSearch/Tuner/Tune/ParallelPhase"):
                 finished_sch: Schedule = self.parallel_phase(untuned_sch)
         else:
@@ -1120,6 +1133,7 @@ class TuningState:
                  max_fail_count,
                  full_first_round_bypass,
                  validate_schedules,
+                 is_gpu_target,
                  ):
         self.max_trials = max_trials
         self.num_trials_per_iter = num_trials_per_iter
@@ -1134,6 +1148,7 @@ class TuningState:
         self.max_fail_count = max_fail_count
         self.full_first_round_bypass: bool = full_first_round_bypass
         self.validate_schedules: bool = validate_schedules
+        self.is_gpu_target: bool = is_gpu_target
 
         self.context: TuneContext = context
         self.mod: IRModule = context.mod
@@ -1382,10 +1397,11 @@ class TuningState:
         #    atleast 64 hardware measurement results. Therefore, it can be time efficient to
         #    bypass the tuning stage on the first iter of each workload.
         first_iter_bypass: bool = False
-        if num_workload_db_entries < 64 and self.full_first_round_bypass:
+        if (num_workload_db_entries < 64 and self.full_first_round_bypass
+                or num_workload_db_entries < self.is_gpu_target):
             first_iter_bypass = True
             logger(logging.INFO, __name__, current_line_number(),
-                   "Bypassing BO Tuner, since XGB cost model is not accurate yet")
+                   "Bypassing BO-Tuner for first 64 Schedules per Workload")
 
         # 6. Sample a new population of random schedules
         unmeasured_schedules: List[Schedule] = self._sample_initial_population(self.population_size)
@@ -1445,7 +1461,7 @@ class TuningState:
 
         # 12. Sometimes it can make sense to bypass the tuner and prepare the sampled schedules for running immediatley
         #     Possible reasons include: design spaces don't have sample instructions, or first round bypass
-        if self.bypass_tuning_no_sample_inst or first_iter_bypass:
+        if self.bypass_tuning_no_sample_inst or first_iter_bypass or len(tune_candidates) == 0:
             run_schedules = TuningCandidate.get_schedules(random_candidates) + \
                             TuningCandidate.get_schedules(tune_candidates)
         else:
@@ -1526,7 +1542,8 @@ class TuningState:
                                work_dir=self.work_dir,
                                mod=self.mod,
                                rand_state=self.rand_state,
-                               only_tune_parallel_extent=only_tune_parallel_extent)
+                               only_tune_parallel_extent=only_tune_parallel_extent,
+                               is_gpu_target=self.is_gpu_target)
         tuned_schedules = bo_tuner.tune()
 
         logger(logging.INFO, __name__, current_line_number(), "Bayesian optimization tuner finished")
@@ -1594,11 +1611,12 @@ class BayesianOptimizationSearch(PySearchStrategy):
 
     population_size = 1024  # The number of random schedules sampled
     init_measured_ratio = 0.1
-    init_min_unmeasured = 20
-    max_fail_count = 5
+    init_min_unmeasured = 64
+    max_fail_count = 10
     save_optimizer: bool = True  # Enables optimizer saving; can be overwritten by optimizer phases
     full_first_round_bypass: bool = False  # Do not tune the first 64 schedules for each workload
     validate_schedules: bool = True  # Use this for debugging; set False for benchmark runs
+    is_gpu_target: bool = False
 
     def _initialize_with_tune_context(self, context: "TuneContext") -> None:
         """Initialize the search strategy with tuning context.
@@ -1609,8 +1627,11 @@ class BayesianOptimizationSearch(PySearchStrategy):
             The tuning context for initialization.
         """
         self.context: TuneContext = context
-        self.postprocs = context.space_generator.postprocs
+        self.postprocs: "Postproc" = context.space_generator.postprocs
         self.rand_state = forkseed(context.rand_state)
+
+        if self.context.target.kind.name == "metal" or self.context.target.kind.name == "cuda":
+            self.is_gpu_target = True
 
     def pre_tuning(
         self,
@@ -1635,11 +1656,9 @@ class BayesianOptimizationSearch(PySearchStrategy):
         cost_model : Optional[CostModel] = None
             The cost model used during tuning process.
         """
-        # ToDo add checks here
         assert design_spaces is not None, "Design spaces should not be None!"
         if self.state is not None:
-            print("ValueError: `PreTuning` is already invoked without corresponding `PostTuning`.")
-            raise ValueError
+            raise ValueError("`PreTuning` is already invoked without corresponding `PostTuning`.")
 
         self.state = TuningState(max_trials=max_trials,
                                  num_trials_per_iter=num_trials_per_iter,
@@ -1654,7 +1673,8 @@ class BayesianOptimizationSearch(PySearchStrategy):
                                  save_optimizer=self.save_optimizer,
                                  max_fail_count=self.max_fail_count,
                                  full_first_round_bypass=self.full_first_round_bypass,
-                                 validate_schedules=self.validate_schedules)
+                                 validate_schedules=self.validate_schedules,
+                                 is_gpu_target=self.is_gpu_target)
 
     def post_tuning(self) -> None:
         """Post-tuning for the search strategy."""
