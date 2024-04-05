@@ -1307,7 +1307,7 @@ class TuningState:
             else:
                 # Pick exploration schedule
                 if len(explore_list) > 0:
-                    index = sample_int(self.rand_state, 0, len(exploit_list))
+                    index = sample_int(self.rand_state, 0, len(explore_list))
                     candidate = TuningCandidate(sch=explore_list[index], measured=False)
                     explore_list.pop(index)
                     mixed_list.append(candidate)
@@ -1317,7 +1317,9 @@ class TuningState:
         if fill_missing:
             if len(mixed_list) < num:
                 for _ in range(num - len(mixed_list)):
-                    candidate = TuningCandidate(sch=random.choice(explore_list), measured=False)
+                    index = sample_int(self.rand_state, 0, len(explore_list))
+                    candidate = TuningCandidate(sch=explore_list[index], measured=False)
+                    explore_list.pop(index)
                     mixed_list.append(candidate)
                     num_explore_schedules += 1
 
