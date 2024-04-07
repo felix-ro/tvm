@@ -565,7 +565,7 @@ class BayOptTuner:
         self.possible_annotate_decisions: dict[str, List[int]] = dict()
         self.path_optimizer_dir: str = self._get_optimizer_dir_path()
         self.optimizer_save_design_space: bool = True
-        self.max_optimizer_entries: int = 500
+        self.max_optimizer_entries: int = 750
         self.postproc_stats = PostProcessingStatistic()
         self.max_failures: int = 5000
         self.max_sch_failure: int = int(self.max_failures / len(self.tune_candidates))
@@ -1467,8 +1467,10 @@ class TuningState:
                                                                            fill_missing=False)
 
         # 10. Get the best schedules from population
-        best_unmeasured_schedules, _ = get_top_k_schedules(self.context, self.cost_model,
-                                                           unmeasured_schedules, sample_num)
+        best_unmeasured_schedules = []
+        if (len(unmeasured_schedules) > 0):
+            best_unmeasured_schedules, _ = get_top_k_schedules(self.context, self.cost_model,
+                                                               unmeasured_schedules, sample_num)
 
         # 11. Pick a mix of measured schedules and unmeasured for tuning.
         #     The number of schedules send to the tuner is decided by how many random
@@ -1479,7 +1481,6 @@ class TuningState:
         #                                                                  epsilon=0.4,
         #                                                                  num=sample_num - len(random_candidates),
         #                                                                  fill_missing=True)
-
         tune_candidates: List[TuningCandidate] = self.epsilon_greedy_only_top(
             exploit_list=measured_schedules,
             explore_list=best_unmeasured_schedules,
