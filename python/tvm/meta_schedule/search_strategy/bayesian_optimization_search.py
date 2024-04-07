@@ -549,30 +549,31 @@ class BayOptTuner:
                  rand_state,
                  only_tune_parallel_extent,
                  is_gpu_target,
-                 max_optimizer_entries):
+                 max_optimizer_entries,
+                 kappa):
         self.tune_candidates: List[TuningCandidate] = tune_candidates
-        self.context: TuneContext = context
-        self.cost_model: CostModel = cost_model
-        self.postprocs: "Postproc" = postprocs
         self.validate_schedules: bool = validate_schedules
         self.max_trials: int = max_trials
         self.optimizer_logging: bool = optimizer_logging
+        self.postprocs: "Postproc" = postprocs
+        self.context: TuneContext = context
+        self.cost_model: CostModel = cost_model
         self.work_dir: str = work_dir
         self.mod: IRModule = mod
         self.rand_state: int = rand_state
+        self.only_tune_parallel_extent = only_tune_parallel_extent
+        self.is_gpu_target = is_gpu_target
+        self.max_optimizer_entries: int = max_optimizer_entries
+        self.kappa: float = kappa
 
         self.log_tuning_traces: bool = False
         self.instruction_decsion_map: dict = dict()
         self.possible_annotate_decisions: dict[str, List[int]] = dict()
         self.path_optimizer_dir: str = self._get_optimizer_dir_path()
         self.optimizer_save_design_space: bool = True
-        self.max_optimizer_entries: int = max_optimizer_entries
         self.postproc_stats = PostProcessingStatistic()
         self.max_failures: int = 5000
         self.max_sch_failure: int = int(self.max_failures / len(self.tune_candidates))
-
-        self.only_tune_parallel_extent = only_tune_parallel_extent
-        self.is_gpu_target = is_gpu_target
 
         if self.optimizer_logging:
             self._setup_optimizer_dir()
@@ -780,8 +781,7 @@ class BayOptTuner:
         optimizer = self._configure_optimizer_logging(untuned_sch=untuned_sch, optimizer=optimizer,
                                                       discrete_points_registered=discrete_points_registered)
 
-        kappa = float(os.getenv("TVM_BO_KAPPA", "5"))
-        utility = UtilityFunction(kind="ucb", kappa=kappa)
+        utility = UtilityFunction(kind="ucb", kappa=self.kappa)
 
         # Since our input into tuning are schedules with high scores we want to
         # register their decisions with the optimizer, so that it knows about a
@@ -1567,7 +1567,8 @@ class TuningState:
                                rand_state=self.rand_state,
                                only_tune_parallel_extent=only_tune_parallel_extent,
                                is_gpu_target=self.search_strategy.is_gpu_target,
-                               max_optimizer_entries=self.search_strategy.max_optimizer_entries)
+                               max_optimizer_entries=self.search_strategy.max_optimizer_entries,
+                               kappa=self.search_strategy.kappa)
         tuned_schedules = bo_tuner.tune()
 
         logger(logging.INFO, __name__, current_line_number(), "Bayesian optimization tuner finished")
@@ -1644,6 +1645,7 @@ class BayesianOptimizationSearch(PySearchStrategy):
 
     def __init__(self):
         self.max_optimizer_entries = int(os.getenv("TVM_BO_MAX_OPTIMIZER_ENTRIES", "500"))
+        self.kappa = float(os.getenv("TVM_BO_KAPPA", "5"))
 
     def _initialize_with_tune_context(self, context: "TuneContext") -> None:
         """Initialize the search strategy with tuning context.
