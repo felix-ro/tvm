@@ -541,16 +541,16 @@ class BayOptTuner:
                  validate_schedules: bool,
                  max_trials: int,
                  optimizer_logging,
-                 postprocs,
-                 context,
-                 cost_model,
-                 work_dir,
-                 mod,
-                 rand_state,
-                 only_tune_parallel_extent,
-                 is_gpu_target,
-                 max_optimizer_entries,
-                 kappa):
+                 postprocs: List["Postproc"],
+                 context: "TuneContext",
+                 cost_model: CostModel,
+                 work_dir: str,
+                 mod: IRModule,
+                 rand_state: int,
+                 only_tune_parallel_extent: bool,
+                 is_gpu_target: bool,
+                 max_optimizer_entries: int,
+                 kappa: float):
         self.tune_candidates: List[TuningCandidate] = tune_candidates
         self.validate_schedules: bool = validate_schedules
         self.max_trials: int = max_trials
