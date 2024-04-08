@@ -1025,7 +1025,7 @@ class BayOptTuner:
 
         Parameters
         ----------
-        file_path: str 
+        file_path: str
             The path to the log file
         k: int
             The number of entries to remove
