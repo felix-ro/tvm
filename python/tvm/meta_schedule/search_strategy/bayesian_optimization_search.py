@@ -34,7 +34,7 @@ import shutil
 import json
 import re
 
-from bayes_opt import BayesianOptimization, UtilityFunction
+from bayes_opt import BayesianOptimization, UtilityFunction, SequentialDomainReductionTransformer
 from bayes_opt.logger import JSONLogger
 from bayes_opt.event import Events
 from bayes_opt.util import load_logs, NotUniqueError
@@ -550,7 +550,8 @@ class BayOptTuner:
                  only_tune_parallel_extent: bool,
                  is_gpu_target: bool,
                  max_optimizer_entries: int,
-                 kappa: float):
+                 kappa: float,
+                 use_sequential_domain_reduction: bool):
         self.tune_candidates: List[TuningCandidate] = tune_candidates
         self.validate_schedules: bool = validate_schedules
         self.max_trials: int = max_trials
@@ -565,6 +566,7 @@ class BayOptTuner:
         self.is_gpu_target = is_gpu_target
         self.max_optimizer_entries: int = max_optimizer_entries
         self.kappa: float = kappa
+        self.use_sequential_domain_reduction: bool = use_sequential_domain_reduction
 
         self.log_tuning_traces: bool = False
         self.instruction_decsion_map: dict = dict()
@@ -769,12 +771,17 @@ class BayOptTuner:
         if self.tuning_report.num_tuneable_insts == 0:
             return untuned_sch
 
+        bounds_transformer = None
+        if self.use_sequential_domain_reduction:
+            bounds_transformer = SequentialDomainReductionTransformer(minimum_window=0.5)
+
         optimizer = BayesianOptimization(
             f=None,  # We register results with the optimizer ourselves
             pbounds=pbounds,
             verbose=2,
             random_state=forkseed(self.rand_state),
-            allow_duplicate_points=False
+            allow_duplicate_points=False,
+            bounds_transformer=bounds_transformer
         )
 
         discrete_points_registered = dict()
@@ -1568,7 +1575,8 @@ class TuningState:
                                only_tune_parallel_extent=only_tune_parallel_extent,
                                is_gpu_target=self.search_strategy.is_gpu_target,
                                max_optimizer_entries=self.search_strategy.max_optimizer_entries,
-                               kappa=self.search_strategy.kappa)
+                               kappa=self.search_strategy.kappa,
+                               use_sequential_domain_reduction=self.search_strategy.use_sequential_domain_reduction)
         tuned_schedules = bo_tuner.tune()
 
         logger(logging.INFO, __name__, current_line_number(), "Bayesian optimization tuner finished")
@@ -1644,8 +1652,9 @@ class BayesianOptimizationSearch(PySearchStrategy):
     is_gpu_target: bool = False
 
     def __init__(self):
-        self.max_optimizer_entries = int(os.getenv("TVM_BO_MAX_OPTIMIZER_ENTRIES", "500"))
-        self.kappa = float(os.getenv("TVM_BO_KAPPA", "5"))
+        self.max_optimizer_entries: int = int(os.getenv("TVM_BO_MAX_OPTIMIZER_ENTRIES", "500"))
+        self.kappa: float = float(os.getenv("TVM_BO_KAPPA", "5"))
+        self.use_sequential_domain_reduction: bool = os.getenv("TVM_USE_SEQUENTIAL_DOMAIN_REDUCTION", "False") == "True"
 
     def _initialize_with_tune_context(self, context: "TuneContext") -> None:
         """Initialize the search strategy with tuning context.
