@@ -775,7 +775,7 @@ class BayOptTuner:
 
         bounds_transformer = None
         if self.use_sequential_domain_reduction:
-            bounds_transformer = SequentialDomainReductionTransformer(minimum_window=0.5)
+            bounds_transformer = SequentialDomainReductionTransformer(minimum_window=1)
 
         optimizer = BayesianOptimization(
             f=None,  # We register results with the optimizer ourselves
