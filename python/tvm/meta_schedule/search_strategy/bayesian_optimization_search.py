@@ -1250,21 +1250,18 @@ class TuningState:
                  design_spaces_schedules: List[Schedule],
                  database: Optional["Database"],
                  cost_model: Optional["CostModel"],
-                 rand_state: np.int64,
-                 context: "TuneContext",
-                 postprocs,
                  search_strategy):
-        self.max_trials = max_trials
-        self.num_trials_per_iter = num_trials_per_iter
-        self.design_space_schedules = design_spaces_schedules
+        self.max_trials: int = max_trials
+        self.num_trials_per_iter: int = num_trials_per_iter
+        self.design_space_schedules: List[Schedule] = design_spaces_schedules
         self.database: Database = database
         self.cost_model: CostModel = cost_model
-        self.rand_state = rand_state
-        self.postprocs = postprocs
         self.search_strategy: "PySearchStrategy" = search_strategy
 
-        self.context: TuneContext = context
-        self.mod: IRModule = context.mod
+        self.rand_state: int = self.search_strategy.rand_state
+        self.postprocs: List["Postproc"] = self.search_strategy.postprocs
+        self.context: TuneContext = self.search_strategy.context
+        self.mod: IRModule = self.context.mod
         self.work_dir: str = self._get_work_dir()
 
         self.design_spaces: List[Trace] = []
@@ -1799,9 +1796,6 @@ class BayesianOptimizationSearch(PySearchStrategy):
                                  design_spaces_schedules=design_spaces,
                                  database=database,
                                  cost_model=cost_model,
-                                 context=self.context,
-                                 postprocs=self.postprocs,
-                                 rand_state=self.rand_state,
                                  search_strategy=self)
 
     def post_tuning(self) -> None:
