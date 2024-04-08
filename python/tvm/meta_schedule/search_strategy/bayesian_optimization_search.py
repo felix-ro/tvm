@@ -550,9 +550,11 @@ class BayOptTuner:
                  only_tune_parallel_extent: bool,
                  is_gpu_target: bool,
                  max_optimizer_entries: int,
-                 kappa: float,
                  use_sequential_domain_reduction: bool,
-                 restricted_memory_logging: bool):
+                 restricted_memory_logging: bool,
+                 acquisition_func_kind: str,
+                 kappa: float,
+                 xi: float):
         self.tune_candidates: List[TuningCandidate] = tune_candidates
         self.validate_schedules: bool = validate_schedules
         self.max_trials: int = max_trials
@@ -566,9 +568,11 @@ class BayOptTuner:
         self.only_tune_parallel_extent = only_tune_parallel_extent
         self.is_gpu_target = is_gpu_target
         self.max_optimizer_entries: int = max_optimizer_entries
-        self.kappa: float = kappa
         self.use_sequential_domain_reduction: bool = use_sequential_domain_reduction
         self.restricted_memory_logging: bool = restricted_memory_logging
+        self.acquisition_func_kind: str = acquisition_func_kind
+        self.kappa: float = kappa
+        self.xi: float = xi
 
         self.log_tuning_traces: bool = False
         self.instruction_decsion_map: dict = dict()
@@ -765,6 +769,27 @@ class BayOptTuner:
 
         return input_decisions
 
+    def _get_acquisition_function(self) -> UtilityFunction:
+        """Returns the acquisition function
+
+        Returns
+        -------
+        acq_func: bayes_opt.UtilityFunction
+            The configured acquisition function
+        """
+        if self.acquisition_func_kind == "ucb":
+            # Upper Confidence Bound
+            acq_func = UtilityFunction(kind="ucb", kappa=self.kappa)
+        elif self.acquisition_func_kind == "poi":
+            # Probability of Improvement
+            acq_func = UtilityFunction(kind="poi", kappa=self.xi)
+        elif self.acquisition_func_kind == "ei":
+            # Expected Improvement
+            acq_func = UtilityFunction(kind="ei", xi=self.xi)
+        else:
+            raise ValueError(f"Unknown acquisition function of kind: {self.acquisition_func_kind}")
+        return acq_func
+
     def bayesian_phase(self, untuned_sch: Schedule, measured: bool) -> Schedule:
         pbounds = self._get_parameters(untuned_sch=untuned_sch)
 
@@ -790,7 +815,7 @@ class BayOptTuner:
         optimizer = self._configure_optimizer_logging(untuned_sch=untuned_sch, optimizer=optimizer,
                                                       probed_discrete_points=probed_discrete_points)
 
-        utility = UtilityFunction(kind="ucb", kappa=self.kappa)
+        acq_func: UtilityFunction = self._get_acquisition_function()
 
         # Since our input into tuning are schedules with high scores we want to
         # register their decisions with the optimizer, so that it knows about a
@@ -821,7 +846,7 @@ class BayOptTuner:
             iteration = 0
             while not new_decision and iteration < 50:
                 iteration += 1
-                next_decisions: dict = optimizer.suggest(utility)
+                next_decisions: dict = optimizer.suggest(acq_func)
                 points_to_probe = list(next_decisions.values())
                 discrete_points = str([int(x) for x in points_to_probe])
                 if discrete_points not in probed_discrete_points:
@@ -1664,9 +1689,11 @@ class TuningState:
                                only_tune_parallel_extent=only_tune_parallel_extent,
                                is_gpu_target=self.search_strategy.is_gpu_target,
                                max_optimizer_entries=self.search_strategy.max_optimizer_entries,
-                               kappa=self.search_strategy.kappa,
                                use_sequential_domain_reduction=self.search_strategy.use_sequential_domain_reduction,
-                               restricted_memory_logging=self.search_strategy.restricted_memory_logging)
+                               restricted_memory_logging=self.search_strategy.restricted_memory_logging,
+                               acquisition_func_kind=self.search_strategy.acquisition_func_kind,
+                               kappa=self.search_strategy.kappa,
+                               xi=self.search_strategy.xi)
         tuned_schedules = bo_tuner.tune()
 
         logger(logging.INFO, __name__, current_line_number(), "Bayesian optimization tuner finished")
@@ -1743,11 +1770,13 @@ class BayesianOptimizationSearch(PySearchStrategy):
 
     def __init__(self):
         self.max_optimizer_entries: int = int(os.getenv("TVM_BO_MAX_OPTIMIZER_ENTRIES", "500"))
-        self.kappa: float = float(os.getenv("TVM_BO_KAPPA", "5"))
         self.use_sequential_domain_reduction: bool = (
             os.getenv("TVM_BO_USE_SEQUENTIAL_DOMAIN_REDUCTION", "False") == "True"
         )
         self.restricted_memory_logging: bool = os.getenv("TVM_BO_RESTRICTED_MEMORY_LOGGING", "False") == "True"
+        self.acquisition_func_kind: str = os.getenv("TVM_BO_ACQUISITION_FUNCTION", "ucb")
+        self.kappa: float = float(os.getenv("TVM_BO_KAPPA", "5"))
+        self.xi: float = float(os.getenv("TVM_BO_XI", "0.1"))
 
     def _initialize_with_tune_context(self, context: "TuneContext") -> None:
         """Initialize the search strategy with tuning context.
