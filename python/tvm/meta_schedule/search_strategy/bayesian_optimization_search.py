@@ -1,4 +1,4 @@
-from typing import TYPE_CHECKING, List, Optional, Any, Dict, Union, Tuple, Set
+from typing import TYPE_CHECKING, List, Optional, Any, Dict, Union, Tuple
 from tvm.tir.schedule import Schedule, Trace, Instruction, BlockRV
 from tvm.tir.analysis import (is_annotate_with_parallel,
                               get_possible_parallel_annotate_decisions,
@@ -548,7 +548,7 @@ class BayOptTuner:
                  acquisition_func_kind: str,
                  kappa: float,
                  xi: float,
-                 measured_schedule_hashes: Set[int]):
+                 measured_schedule_hashes: set[int]):
         self.tune_candidates: List[TuningCandidate] = tune_candidates
         self.validate_schedules: bool = validate_schedules
         self.max_trials: int = max_trials
@@ -791,6 +791,23 @@ class BayOptTuner:
             raise ValueError(f"Unknown acquisition function of kind: {self.acquisition_func_kind}")
         return acq_func
 
+    def _get_next_decision(self, optimizer: BayesianOptimization, acq_func: UtilityFunction,
+                           probed_discrete_points: set[str]) -> Optional[dict]:
+        new_decision = False
+        iteration = 0
+        while not new_decision and iteration < 50:
+            iteration += 1
+            next_decisions: dict = optimizer.suggest(acq_func)
+            suggested_decision_values = list(next_decisions.values())
+            discrete_decision_points = create_hash(str([int(x) for x in suggested_decision_values]))
+            if discrete_decision_points not in probed_discrete_points:
+                new_decision = True
+                probed_discrete_points.add(discrete_decision_points)
+            else:
+                self.tuning_report.num_duplicate_points_skipped += 1
+
+        return next_decisions
+
     def bayesian_phase(self, untuned_sch: Schedule, measured: bool) -> Schedule:
         pbounds = self._get_parameters(untuned_sch=untuned_sch)
 
@@ -812,7 +829,7 @@ class BayOptTuner:
             bounds_transformer=bounds_transformer
         )
 
-        probed_discrete_points: Set[str] = set()
+        probed_discrete_points: set[str] = set()
         optimizer = self._configure_optimizer_logging(untuned_sch=untuned_sch, optimizer=optimizer,
                                                       probed_discrete_points=probed_discrete_points)
 
@@ -836,24 +853,10 @@ class BayOptTuner:
 
         max_target: float = 0.0
         max_decisions: dict = None
-
         current_trial: int = 0
         failure_count: int = 0
         while (current_trial < self.max_trials and failure_count < self.max_sch_failure):
-            # Get the a list of decisions for the entered pbounds
-            new_decision = False
-            next_decisions = None
-            iteration = 0
-            while not new_decision and iteration < 50:
-                iteration += 1
-                next_decisions: dict = optimizer.suggest(acq_func)
-                points_to_probe = list(next_decisions.values())
-                discrete_points = create_hash(str([int(x) for x in points_to_probe]))
-                if discrete_points not in probed_discrete_points:
-                    new_decision = True
-                    probed_discrete_points.add(discrete_points)
-                else:
-                    self.tuning_report.num_duplicate_points_skipped += 1
+            next_decisions: Optional[dict] = self._get_next_decision(optimizer, acq_func, probed_discrete_points)
 
             if next_decisions is None:
                 self.tuning_report.optimizer_failure = True
@@ -981,12 +984,12 @@ class BayOptTuner:
                 shutil.copy(pre_tuning_file_path, file_path)
 
     @staticmethod
-    def register_discrete_points(discrete_points_registered: Set[str], file_path: str):
+    def register_discrete_points(discrete_points_registered: set[str], file_path: str):
         """Registers the discrete points probed by reading back the json log
 
         Parameters
         ----------
-        discrete_points_registered: Set[str]
+        discrete_points_registered: set[str]
             The set containing the probed points as hashes
         file_path: str
             The path to the json log file
@@ -1078,7 +1081,7 @@ class BayOptTuner:
 
     def _configure_optimizer_logging(self, untuned_sch: Schedule,
                                      optimizer: BayesianOptimization,
-                                     probed_discrete_points: Set[str]) -> BayesianOptimization:
+                                     probed_discrete_points: set[str]) -> BayesianOptimization:
         """Configures the logging behavior of the optimizer
 
         Parameters
@@ -1087,7 +1090,7 @@ class BayOptTuner:
             The input schedule of the optimizer
         optimizer: bayes_opt.BayesianOptimization
             The bayesian optimizer to configure
-        probed_discrete_points: set
+        probed_discrete_points: set[str]
             A dictionary that should contain the discrete points the optimizer has probed
 
         Returns
