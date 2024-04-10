@@ -1,4 +1,4 @@
-from typing import TYPE_CHECKING, List, Optional, Any, Dict, Union, Tuple
+from typing import TYPE_CHECKING, List, Optional, Any, Dict, Union, Tuple, Set
 from tvm.tir.schedule import Schedule, Trace, Instruction, BlockRV
 from tvm.tir.analysis import (is_annotate_with_parallel,
                               get_possible_parallel_annotate_decisions,
@@ -59,9 +59,7 @@ def create_hash(input_string: str) -> str:
     hash_string: str
         The corresponding hash-str
     """
-    input_bytes = input_string.encode('utf-8')
-    hash_obj = hashlib.sha256(input_bytes)
-    return hash_obj.hexdigest()
+    return hashlib.md5(input_string.encode()).hexdigest()
 
 
 def current_line_number() -> int:
@@ -550,7 +548,7 @@ class BayOptTuner:
                  acquisition_func_kind: str,
                  kappa: float,
                  xi: float,
-                 measured_schedule_hashes: set):
+                 measured_schedule_hashes: Set[int]):
         self.tune_candidates: List[TuningCandidate] = tune_candidates
         self.validate_schedules: bool = validate_schedules
         self.max_trials: int = max_trials
@@ -814,7 +812,7 @@ class BayOptTuner:
             bounds_transformer=bounds_transformer
         )
 
-        probed_discrete_points = dict()
+        probed_discrete_points: Set[str] = set()
         optimizer = self._configure_optimizer_logging(untuned_sch=untuned_sch, optimizer=optimizer,
                                                       probed_discrete_points=probed_discrete_points)
 
@@ -822,15 +820,14 @@ class BayOptTuner:
 
         # Since our input into tuning are schedules with high scores we want to
         # register their decisions with the optimizer, so that it knows about a
-        # good result in the beginning.
+        # good point in the beginning.
         input_decisions = self._get_decisions(sch=untuned_sch)
         try:
             optimizer.register(params=input_decisions, target=self.tuning_report.pre_tuning_score)
-            probed_discrete_points[str(list(input_decisions.values()))] = None
+            probed_discrete_points.add(create_hash(str(list(input_decisions.values()))))
         except NotUniqueError:
+            # When registering a database schedule by hand we may create a duplicate.
             pass
-            # logger(logging.DEBUG, __name__, current_line_number(),
-            #        "Duplicate point during optimizer initialization (database schedule)")
 
         if self.validate_schedules:
             # Validate that recreated trace is identical to input trace
@@ -851,10 +848,10 @@ class BayOptTuner:
                 iteration += 1
                 next_decisions: dict = optimizer.suggest(acq_func)
                 points_to_probe = list(next_decisions.values())
-                discrete_points = str([int(x) for x in points_to_probe])
+                discrete_points = create_hash(str([int(x) for x in points_to_probe]))
                 if discrete_points not in probed_discrete_points:
                     new_decision = True
-                    probed_discrete_points[discrete_points] = None
+                    probed_discrete_points.add(discrete_points)
                 else:
                     self.tuning_report.num_duplicate_points_skipped += 1
 
@@ -984,15 +981,24 @@ class BayOptTuner:
                 shutil.copy(pre_tuning_file_path, file_path)
 
     @staticmethod
-    def register_discrete_points(discrete_points_registered: dict, file_path: str):
+    def register_discrete_points(discrete_points_registered: Set[str], file_path: str):
+        """Registers the discrete points probed by reading back the json log
+
+        Parameters
+        ----------
+        discrete_points_registered: Set[str]
+            The set containing the probed points as hashes
+        file_path: str
+            The path to the json log file
+        """
         with open(file_path, 'r') as file:
             for line in file:
                 # Parse the JSON line
                 json_data = json.loads(line)
                 decisions = json_data['params']
                 points_to_probe = list(decisions.values())
-                discrete_points = str([int(x) for x in points_to_probe])
-                discrete_points_registered[discrete_points] = None
+                discrete_points = create_hash(str([int(x) for x in points_to_probe]))
+                discrete_points_registered.add(discrete_points)
 
     def _get_most_recent_log_file(self, trace_id: str) -> Union[str, int]:
         """Returns the most recent log file path for a trace_id
@@ -1072,7 +1078,7 @@ class BayOptTuner:
 
     def _configure_optimizer_logging(self, untuned_sch: Schedule,
                                      optimizer: BayesianOptimization,
-                                     probed_discrete_points: dict) -> BayesianOptimization:
+                                     probed_discrete_points: Set[str]) -> BayesianOptimization:
         """Configures the logging behavior of the optimizer
 
         Parameters
@@ -1081,7 +1087,7 @@ class BayOptTuner:
             The input schedule of the optimizer
         optimizer: bayes_opt.BayesianOptimization
             The bayesian optimizer to configure
-        probed_discrete_points: dict
+        probed_discrete_points: set
             A dictionary that should contain the discrete points the optimizer has probed
 
         Returns
@@ -1604,15 +1610,6 @@ class TuningState:
             best_unmeasured_schedules, _ = get_top_k_schedules(self.context, self.cost_model,
                                                                unmeasured_schedules, sample_num)
 
-        # 11. Pick a mix of measured schedules and unmeasured for tuning.
-        #     The number of schedules send to the tuner is decided by how many random
-        #     schedules were selected for direct measurement.
-        # Alternative implementation (contains duplicates)
-        # tune_candidates: List[TuningCandidate] = self.epsilon_greedy_mix(exploit_list=measured_schedules,
-        #                                                                  explore_list=best_unmeasured_schedules,
-        #                                                                  epsilon=0.4,
-        #                                                                  num=sample_num - len(random_candidates),
-        #                                                                  fill_missing=True)
         tune_candidates: List[TuningCandidate] = self.epsilon_greedy_only_top(
             exploit_list=measured_schedules,
             explore_list=best_unmeasured_schedules,
