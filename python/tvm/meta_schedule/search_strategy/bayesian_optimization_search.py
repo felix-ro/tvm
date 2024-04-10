@@ -3,7 +3,7 @@ from tvm.tir.schedule import Schedule, Trace, Instruction, BlockRV
 from tvm.tir.analysis import (is_annotate_with_parallel,
                               get_possible_parallel_annotate_decisions,
                               collect_compute_location_indices)
-from tvm.ir import IRModule, make_node
+from tvm.ir import IRModule, make_node, structural_hash
 from tvm.runtime import String
 from tvm.tir import IntImm
 
@@ -233,13 +233,8 @@ def get_possible_tiling_decisions(tile_product: int, num_tiles: int, max_innterm
         return list(unique_combinations)
 
 
-def remove_duplicate_schedules(schedules: List[Schedule]) -> List[Schedule]:
-    unique_schedules_dict = {str(sch.trace.simplified(remove_postproc=False)): sch for sch in schedules}
-    return list(unique_schedules_dict.values())
-
-
-def get_num_unique_traces(schedules: List[Schedule]):
-    """Returns the number unique Traces in a list of Schedules
+def get_num_unique_schedules(schedules: List[Schedule]):
+    """Returns the number unique programs in a list of Schedules
 
     Parameters
     ----------
@@ -251,8 +246,8 @@ def get_num_unique_traces(schedules: List[Schedule]):
     num: int
         The number of unique Traces in the list of Schedules
     """
-    unique_traces = {str(sch.trace.simplified(remove_postproc=False)) for sch in schedules}
-    return len(unique_traces)
+    unique_programs = {structural_hash(sch.mod) for sch in schedules}
+    return len(unique_programs)
 
 
 def create_schedule_from_trace(mod: IRModule, trace: Trace, postprocs: List["Postproc"],
@@ -554,7 +549,8 @@ class BayOptTuner:
                  restricted_memory_logging: bool,
                  acquisition_func_kind: str,
                  kappa: float,
-                 xi: float):
+                 xi: float,
+                 measured_schedule_hashes: set):
         self.tune_candidates: List[TuningCandidate] = tune_candidates
         self.validate_schedules: bool = validate_schedules
         self.max_trials: int = max_trials
@@ -573,6 +569,7 @@ class BayOptTuner:
         self.acquisition_func_kind: str = acquisition_func_kind
         self.kappa: float = kappa
         self.xi: float = xi
+        self.measured_schedule_hashes = measured_schedule_hashes.copy()
 
         self.log_tuning_traces: bool = False
         self.instruction_decsion_map: dict = dict()
@@ -601,7 +598,13 @@ class BayOptTuner:
 
         tuning_summary.log()
         self.postproc_stats.log(self.context.task_name, current_line_number(), "Tuning Postproc Summary")
-        return tuned_schedules
+
+        filtered_schedules = []
+        for tuned_sch in tuned_schedules:
+            if structural_hash(tuned_sch.mod) not in self.measured_schedule_hashes:
+                filtered_schedules.append(tuned_sch)
+
+        return filtered_schedules
 
     def tune_single_schedule(self, untuned_sch: Schedule, measured: bool) -> Union[Schedule | TuningReport]:
         pre_tuning_score = self._predict_normalized_score(untuned_sch)
@@ -1299,6 +1302,17 @@ class TuningState:
         self.bypass_tuning_no_sample_inst: bool = False
 
         self.workload = database.commit_workload(self.mod)
+        self.measured_schedule_hashes = set()
+
+    def filter_schedules(self, schedules: List[Schedule]) -> List[Schedule]:
+        unique_unmeasured_schedules = dict()
+
+        for sch in schedules:
+            hashed = structural_hash(sch.mod)
+            if hashed not in self.measured_schedule_hashes:
+                unique_unmeasured_schedules[hashed] = sch
+
+        return list(unique_unmeasured_schedules.values())
 
     def _get_work_dir(self) -> str:
         """Retrieves the working directory path
@@ -1319,7 +1333,13 @@ class TuningState:
         self.database = None
         self.cost_model = None
 
-    def _pick_best_from_database(self, num: int) -> List[Schedule]:
+    def _register_measured_schedules(self, schedules: List[Schedule]):
+        hashed_schedules = [structural_hash(sch.mod) for sch in schedules]
+        for hasched_sch in hashed_schedules:
+            if hasched_sch not in self.measured_schedule_hashes:
+                self.measured_schedule_hashes.add(hasched_sch)
+
+    def _get_schedules_from_database(self) -> List[Schedule]:
         """Retrieves the best schedules for a workload from the database
 
         Parameters
@@ -1332,15 +1352,18 @@ class TuningState:
             The list of the best-num of Schedules
         """
         with Profiler.timeit("BayOptSearch/GenerateCandidates/PickBestFromDatabase"):
-            # 1. Load top k tuning records for a workload from database
-            tuning_records: List[TuningRecord] = self.database.get_top_k(self.workload, num)
+            # 1. Load all tuning records for a workload from database
+            tuning_records: List[TuningRecord] = self.database.get_top_k(self.workload, len(self.database))
             picked_traces: List[Trace] = [record.trace for record in tuning_records]
 
             # 2. Create Schedules from the traces
             schedules: List[Schedule] = self._process_database_trace(picked_traces)
 
+            # 3. Register measured schedules to avoid measuring them again
+            self._register_measured_schedules(schedules)
+
             logger(logging.INFO, __name__, current_line_number(),
-                   f"Picked {len(schedules)} schedules from database")
+                   f"Picked {get_num_unique_schedules(schedules)} schedules from database")
             return schedules
 
     def _process_database_trace(self, picked_traces: List[Trace]) -> List[Schedule]:
@@ -1475,7 +1498,7 @@ class TuningState:
         tune_candidates.extend(selected_measured)
         tune_candidates.extend(selected_unmeasured)
 
-        assert len(tune_candidates) == num
+        # assert len(tune_candidates) == num
 
         return tune_candidates
 
@@ -1530,18 +1553,15 @@ class TuningState:
 
         # 4. When there are more than 128 entries for a workload in the database
         #    we start mixing the best ones into the tuning set
-        num_workload_db_entries = self._get_num_workload_entries()
-        measured_schedules: List[Schedule] = []
-        if num_workload_db_entries >= 128:
-            # Get the top 32 measured schedules in the database
-            measured_schedules = self._pick_best_from_database(64)
+        measured_schedules: List[Schedule] = self._get_schedules_from_database()
+        num_workload_db_entries = len(measured_schedules)
 
         # 5. The XGB cost model will give random predictions if the workload does not have
         #    atleast 64 hardware measurement results. Therefore, it can be time efficient to
         #    bypass the tuning stage on the first iter of each workload.
         first_iter_bypass: bool = False
         if (num_workload_db_entries < 64 and self.search_strategy.full_first_round_bypass
-                or num_workload_db_entries < self.search_strategy.is_gpu_target):
+                or num_workload_db_entries < 64 and self.search_strategy.is_gpu_target):
             first_iter_bypass = True
             logger(logging.INFO, __name__, current_line_number(),
                    "Bypassing BO-Tuner for first 64 Schedules per Workload")
@@ -1552,14 +1572,14 @@ class TuningState:
         if self.search_strategy.validate_schedules:
             # Gives some insight if the random generation is working as intended
             logger(logging.INFO, __name__, current_line_number(),
-                   f"Sampling included {get_num_unique_traces(unmeasured_schedules)} unique schedule(s)")
+                   f"Sampling included {get_num_unique_schedules(unmeasured_schedules)} unique schedule(s)")
 
         # 7. Check if minimum amount of schedules were sampled
         if (len(unmeasured_schedules) < self.search_strategy.init_min_unmeasured):
             raise ValueError("Could not sample a sufficient number of random schedules")
 
         # 8. Remove duplicates
-        unmeasured_schedules = remove_duplicate_schedules(unmeasured_schedules)
+        unmeasured_schedules = self.filter_schedules(unmeasured_schedules)
 
         logger(logging.INFO, __name__, current_line_number(),
                f"Prepared a population of {len(measured_schedules) + len(unmeasured_schedules)} " +
@@ -1574,6 +1594,9 @@ class TuningState:
                                                                            epsilon=0.2,
                                                                            num=sample_num,
                                                                            fill_missing=False)
+
+        # Register the random candidates already
+        self._register_measured_schedules(TuningCandidate.get_schedules(random_candidates))
 
         # 10. Get the best schedules from population
         best_unmeasured_schedules = []
@@ -1601,7 +1624,7 @@ class TuningState:
             tune_schs = TuningCandidate.get_schedules(tune_candidates)
             # Gives some insight on the number of duplicates entering the tuner
             logger(logging.INFO, __name__, current_line_number(),
-                   f"Tuner set includes {get_num_unique_traces(tune_schs)} unique schedule(s)")
+                   f"Tuner set includes {get_num_unique_schedules(tune_schs)} unique schedule(s)")
 
         # 12. Sometimes it can make sense to bypass the tuner and prepare the sampled schedules for running immediatley
         #     Possible reasons include: design spaces don't have sample instructions, or first round bypass
@@ -1613,7 +1636,10 @@ class TuningState:
             tuned_schedules: List[Schedule] = self._send_to_bayesian_tuner(tune_candidates)
             run_schedules = TuningCandidate.get_schedules(random_candidates) + tuned_schedules
 
-        assert len(run_schedules) == sample_num
+        if self.search_strategy.validate_schedules:
+            logger(logging.INFO, __name__, current_line_number(),
+                   f"Runner set includes {get_num_unique_schedules(run_schedules)} unique schedule(s)")
+        # assert len(run_schedules) == sample_num
         # 14. Assemble the measurement candidates
         return assemble_candidates(run_schedules)
 
@@ -1693,7 +1719,8 @@ class TuningState:
                                restricted_memory_logging=self.search_strategy.restricted_memory_logging,
                                acquisition_func_kind=self.search_strategy.acquisition_func_kind,
                                kappa=self.search_strategy.kappa,
-                               xi=self.search_strategy.xi)
+                               xi=self.search_strategy.xi,
+                               measured_schedule_hashes=self.measured_schedule_hashes)
         tuned_schedules = bo_tuner.tune()
 
         logger(logging.INFO, __name__, current_line_number(), "Bayesian optimization tuner finished")
