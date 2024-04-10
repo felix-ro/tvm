@@ -832,7 +832,7 @@ class BayOptTuner:
         if self.validate_schedules:
             # Validate that recreated trace is identical to input trace
             copy_sch = self._get_schedule_with_predicted_decisons(untuned_sch, input_decisions)
-            assert str(untuned_sch.trace) == str(copy_sch.trace)
+            assert structural_hash(untuned_sch.mod) == structural_hash(copy_sch.mod)
 
         max_target: float = 0.0
         max_decisions: dict = None
@@ -1161,9 +1161,7 @@ class BayOptTuner:
 
     def _find_matching_instruction(self, sch: Schedule, inst: Instruction):
         for new_inst, _ in sch.trace.decisions.items():
-            # print(f"{inst.outputs}, {new_inst.outputs}, same {str(new_inst.outputs) == str(inst.outputs)}")
             if str(new_inst.outputs) == str(inst.outputs):
-                # print("matched")
                 return new_inst
 
     def _get_parameter_name(self, inst: Instruction, decisions: DECISION_TYPE) -> str:
