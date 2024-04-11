@@ -90,16 +90,28 @@ def forkseed(rand_state: int) -> int:
     return (rand_state * 32767) % 1999999973
 
 
-# ToDo rework this function
-def sample_int(rand_state: np.int64, min_inclusive: int, max_exclusive: int):
-    assert min_inclusive < max_exclusive, "ValueError: max_exclusive must be greater than min_inclusive."
+def sample_int(min_inclusive: int, max_exclusive: int):
+    """Sample a random integer x from a range  (x | min_inclusive <= x < max_exclusive)
+
+    Parameters
+    ----------
+    min_inclusive: int
+        The minimum value included in the range
+    max_exclusive: int
+        The maximum value excluded from the range
+
+    Returns
+    -------
+    dist: int
+        The sampled integer
+    """
+    if min_inclusive >= max_exclusive:
+        raise ValueError("max_exclusive must be greater than min_inclusive.")
 
     if ((min_inclusive + 1) == max_exclusive):
         return min_inclusive
-    rand_ = forkseed(rand_state)
-    # call np.random to generate [min, max-1]
-    np.random.seed(rand_)
-    dist = random.randint(min_inclusive, max_exclusive-1)
+
+    dist = np.random.randint(min_inclusive, max_exclusive)
     return dist
 
 
@@ -1455,14 +1467,14 @@ class TuningState:
             if random.random() > epsilon:
                 # Pick exploitation schedule
                 if len(exploit_list) > 0:
-                    index = sample_int(self.rand_state, 0, len(exploit_list))
+                    index = sample_int(0, len(exploit_list))
                     candidate = TuningCandidate(sch=exploit_list[index], measured=True)
                     exploit_list.pop(index)
                     mixed_list.append(candidate)
             else:
                 # Pick exploration schedule
                 if len(explore_list) > 0:
-                    index = sample_int(self.rand_state, 0, len(explore_list))
+                    index = sample_int(0, len(explore_list))
                     candidate = TuningCandidate(sch=explore_list[index], measured=False)
                     explore_list.pop(index)
                     mixed_list.append(candidate)
@@ -1472,7 +1484,7 @@ class TuningState:
         if fill_missing:
             if len(mixed_list) < num:
                 for _ in range(num - len(mixed_list)):
-                    index = sample_int(self.rand_state, 0, len(explore_list))
+                    index = sample_int(0, len(explore_list))
                     candidate = TuningCandidate(sch=explore_list[index], measured=False)
                     explore_list.pop(index)
                     mixed_list.append(candidate)
@@ -1762,7 +1774,7 @@ class TuningState:
 
                 def create_random_schedule() -> Schedule | None:
                     # 1. Randomly pick a design space
-                    design_space_index: int = sample_int(self.rand_state, 0, len(self.design_spaces))
+                    design_space_index: int = sample_int(0, len(self.design_spaces))
                     # 2. Create a trace with random decisions from design space instructions
                     trace: Trace = Trace(self.design_spaces[design_space_index].insts, {})
                     # 3. Create a schedule from trace
