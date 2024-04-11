@@ -1468,7 +1468,7 @@ class TuningState:
         self.workload = database.commit_workload(self.mod)
         self.measured_schedule_hashes = set()
 
-    def remove_measured_schedules(self, schedules: List[Schedule]) -> List[Schedule]:
+    def remove_duplicates_and_measured_schedules(self, schedules: List[Schedule]) -> List[Schedule]:
         """Remove measured Schedules from a list of Schedules
 
         Parameters
@@ -1482,11 +1482,13 @@ class TuningState:
             The list of filtered Schedules
         """
         unique_unmeasured_schedules = []
+        added_set: set[int] = set()
 
         for sch in schedules:
             hashed = structural_hash(sch.mod)
-            if hashed not in self.measured_schedule_hashes:
+            if hashed not in self.measured_schedule_hashes and hashed not in added_set:
                 unique_unmeasured_schedules.append(sch)
+                added_set.add(hashed)
 
         return unique_unmeasured_schedules
 
@@ -1546,7 +1548,7 @@ class TuningState:
             self.register_measured_schedules(schedules)
 
             logger(logging.INFO, __name__, current_line_number(),
-                   f"Picked {get_num_unique_schedules(schedules)} schedules from database")
+                   f"Picked {get_num_unique_schedules(schedules), len(schedules)} schedules from database")
             return schedules
 
     def process_database_trace(self, picked_traces: List[Trace]) -> List[Schedule]:
@@ -1761,8 +1763,8 @@ class TuningState:
         if (len(unmeasured_schedules) < self.search_strategy.init_min_unmeasured):
             raise ValueError("Could not sample a sufficient number of random schedules")
 
-        # 8. Remove duplicates
-        unmeasured_schedules = self.remove_measured_schedules(unmeasured_schedules)
+        # 8. Remove measured schedules and duplicates
+        unmeasured_schedules = self.remove_duplicates_and_measured_schedules(unmeasured_schedules)
 
         logger(logging.INFO, __name__, current_line_number(),
                f"Prepared a population of {len(measured_schedules) + len(unmeasured_schedules)} " +
@@ -1803,8 +1805,10 @@ class TuningState:
         # 12. Sometimes it can make sense to bypass the tuner and prepare the sampled schedules for running immediatley
         #     Possible reasons include: design spaces don't have sample instructions, or first round bypass
         if self.bypass_tuning_no_sample_inst or first_iter_bypass or len(tune_candidates) == 0:
-            run_schedules = TuningCandidate.get_schedules(random_candidates) + \
-                            TuningCandidate.get_schedules(tune_candidates)
+            tune_candidates = self.remove_duplicates_and_measured_schedules(
+                    TuningCandidate.get_schedules(tune_candidates)
+                )
+            run_schedules = TuningCandidate.get_schedules(random_candidates) + tune_candidates
         else:
             # 13. Send the tuning candidates to the tuner
             tuned_schedules: List[Schedule] = self.send_to_bayesian_tuner(tune_candidates)
