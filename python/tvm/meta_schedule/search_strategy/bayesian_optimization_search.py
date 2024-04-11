@@ -1321,17 +1321,18 @@ class TuningState:
         self.cost_model: CostModel = cost_model
         self.search_strategy: "PySearchStrategy" = search_strategy
 
+        # Extract some values from search_strategy
         self.rand_state: int = self.search_strategy.rand_state
         self.postprocs: List["Postproc"] = self.search_strategy.postprocs
         self.context: TuneContext = self.search_strategy.context
+
         self.mod: IRModule = self.context.mod
         self.work_dir: str = self.get_work_dir()
-
         self.design_spaces: List[Trace] = []
         for space in self.design_space_schedules:
             self.design_spaces.append(space.trace.simplified(True))
 
-        # [st, ed) are the indices of the next batch of candidates.
+        # Start and end iteration
         self.st: int = 0
         self.ed: int = num_trials_per_iter
         self.bypass_tuning_no_sample_inst: bool = False
