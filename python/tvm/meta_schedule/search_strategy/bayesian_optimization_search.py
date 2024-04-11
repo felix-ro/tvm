@@ -405,7 +405,7 @@ class TuningReport:
                    "Failed to apply tuning decisions to trace")
         elif self.optimizer_failure:
             logger(logging.ERROR, __name__, current_line_number(),
-                   "Optimizer failed to predict next decision")
+                   "Optimizer failed to predict an unprobed point")
         else:
             message = self.create_tuning_result_message()
             logger(logging.DEBUG, __name__, current_line_number(), message)
@@ -639,8 +639,10 @@ class BayOptTuner:
             # 2. Send to tuner
             sch, report = self.tune_single_schedule(candidate.sch, candidate.measured)
             # 3. Check that we have not measured the schedule before
-            if structural_hash(sch.mod) not in self.measured_schedule_hashes:
+            hash: int = structural_hash(sch.mod)
+            if hash not in self.measured_schedule_hashes:
                 tuned_schedules.append(sch)
+                self.measured_schedule_hashes.add(hash)
                 # 4. Analyse report
                 report.analyse_tuning_report()
                 tuning_summary.enter_tuning_report(report)
@@ -843,19 +845,21 @@ class BayOptTuner:
     def get_next_decision(self, optimizer: BayesianOptimization, acq_func: UtilityFunction,
                           probed_discrete_points: set[str]) -> Optional[dict]:
         new_decision = False
+        next_decision = None
         iteration = 0
-        while not new_decision and iteration < 50:
+        while not new_decision and iteration < 15:
             iteration += 1
-            next_decisions: dict = optimizer.suggest(acq_func)
-            suggested_decision_values = list(next_decisions.values())
+            possible_decision: dict = optimizer.suggest(acq_func)
+            suggested_decision_values = list(possible_decision.values())
             discrete_decision_points = create_hash(str([int(x) for x in suggested_decision_values]))
             if discrete_decision_points not in probed_discrete_points:
                 new_decision = True
+                next_decision = possible_decision
                 probed_discrete_points.add(discrete_decision_points)
             else:
                 self.tuning_report.num_duplicate_points_skipped += 1
 
-        return next_decisions
+        return next_decision
 
     def bayesian_phase(self, input_sch: Schedule, measured: bool) -> Schedule:
         """ The Bayesian Optimization phase
@@ -939,31 +943,33 @@ class BayOptTuner:
             # 4. Create schedule based on the predicted decisions
             sch: Optional[Schedule] = self.get_schedule_with_predicted_decisons(input_sch, next_decisions)
 
-            # 5. Check that the schedule passed post processing
+            # 5. Get cost model scoring for schedule
             if sch is None:
-                failure_count += 1
-                continue
+                score = 0.0
+            else:
+                score = self.predict_score(sch)
 
-            # 6. Get cost model scoring for schedule
-            score = self.predict_score(sch)
-
-            # 7. Register score and decisions with optimizer to improve next suggestion
+            # 6. Register score and decisions with optimizer to improve next suggestion
             try:
                 optimizer.register(
                     params=next_decisions,
                     target=score,
                 )
             except NotUniqueError as e:
-                # 8. We should not get duplicates here
+                # 7. We should not get duplicates here
                 logger(logging.ERROR, __name__, current_line_number(),
                        f"BO tried to register a duplicate point: {e}")
 
-            # 9. Save the score and schedule if its a new best
+            # 8. Save the score and schedule if its a new best
             if score >= max_score:
                 max_score = score
                 max_schedule = sch
 
-            current_trial += 1
+            # 9. Increment failure count or trial count depending on result
+            if sch is None:
+                failure_count += 1
+            else:
+                current_trial += 1
 
         # ----------------------------------------------------------------------------------------- #
         # 1. We have finished probing points let's report what we have done
@@ -1548,7 +1554,7 @@ class TuningState:
             self.register_measured_schedules(schedules)
 
             logger(logging.INFO, __name__, current_line_number(),
-                   f"Picked {get_num_unique_schedules(schedules), len(schedules)} schedules from database")
+                   f"Picked {len(schedules)} schedules from database")
             return schedules
 
     def process_database_trace(self, picked_traces: List[Trace]) -> List[Schedule]:
@@ -1753,18 +1759,16 @@ class TuningState:
 
         # 6. Sample a new population of random schedules
         unmeasured_schedules: List[Schedule] = self.sample_initial_population(self.search_strategy.population_size)
+        unmeasured_schedules: List[Schedule] = self.remove_duplicates_and_measured_schedules(unmeasured_schedules)
 
         if self.search_strategy.validate_schedules:
             # Gives some insight if the random generation is working as intended
             logger(logging.INFO, __name__, current_line_number(),
-                   f"Sampling included {get_num_unique_schedules(unmeasured_schedules)} unique schedule(s)")
+                   f"Sampling included {self.get_num_unique_and_unmeasured_schedules(unmeasured_schedules)} "
+                   "unmeasured unique schedule(s)")
 
-        # 7. Check if minimum amount of schedules were sampled
-        if (len(unmeasured_schedules) < self.search_strategy.init_min_unmeasured):
-            raise ValueError("Could not sample a sufficient number of random schedules")
-
-        # 8. Remove measured schedules and duplicates
-        unmeasured_schedules = self.remove_duplicates_and_measured_schedules(unmeasured_schedules)
+        assert (len(measured_schedules) + len(unmeasured_schedules)) == \
+               (get_num_unique_schedules(unmeasured_schedules + measured_schedules))
 
         logger(logging.INFO, __name__, current_line_number(),
                f"Prepared a population of {len(measured_schedules) + len(unmeasured_schedules)} " +
@@ -1782,44 +1786,59 @@ class TuningState:
 
         # Register the random candidates already
         self.register_measured_schedules(TuningCandidate.get_schedules(random_candidates))
+        assert self.get_num_unique_and_unmeasured_schedules(unmeasured_schedules) == len(unmeasured_schedules)
 
-        # 10. Get the best schedules from population
         best_unmeasured_schedules = []
         if (len(unmeasured_schedules) > 0):
             best_unmeasured_schedules, _ = get_top_k_schedules(self.context, self.cost_model,
                                                                unmeasured_schedules, sample_num)
 
-        tune_candidates: List[TuningCandidate] = self.epsilon_greedy_only_top(
-            exploit_list=measured_schedules,
-            explore_list=best_unmeasured_schedules,
-            epsilon=0.4,
-            num=sample_num - len(random_candidates)
-        )
-
-        if self.search_strategy.validate_schedules:
-            tune_schs = TuningCandidate.get_schedules(tune_candidates)
-            # Gives some insight on the number of duplicates entering the tuner
-            logger(logging.INFO, __name__, current_line_number(),
-                   f"Tuner set includes {get_num_unique_schedules(tune_schs)} unique schedule(s)")
-
         # 12. Sometimes it can make sense to bypass the tuner and prepare the sampled schedules for running immediatley
         #     Possible reasons include: design spaces don't have sample instructions, or first round bypass
-        if self.bypass_tuning_no_sample_inst or first_iter_bypass or len(tune_candidates) == 0:
-            tune_candidates = self.remove_duplicates_and_measured_schedules(
-                    TuningCandidate.get_schedules(tune_candidates)
-                )
-            run_schedules = TuningCandidate.get_schedules(random_candidates) + tune_candidates
+        if self.bypass_tuning_no_sample_inst or first_iter_bypass:
+            num_random_best = sample_num - len(random_candidates)
+            run_schedules = TuningCandidate.get_schedules(random_candidates) + \
+                best_unmeasured_schedules[:num_random_best]
         else:
+            tune_candidates: List[TuningCandidate] = self.epsilon_greedy_only_top(
+                exploit_list=measured_schedules,
+                explore_list=best_unmeasured_schedules,
+                epsilon=0.4,
+                num=sample_num - len(random_candidates)
+            )
+
+            if self.search_strategy.validate_schedules:
+                tune_schs = TuningCandidate.get_schedules(tune_candidates)
+                # Gives some insight on the number of duplicates entering the tuner
+                logger(logging.INFO, __name__, current_line_number(),
+                       f"Tuner set includes {get_num_unique_schedules(tune_schs)} unique schedule(s)")
             # 13. Send the tuning candidates to the tuner
             tuned_schedules: List[Schedule] = self.send_to_bayesian_tuner(tune_candidates)
+            assert self.get_num_unique_and_unmeasured_schedules(tuned_schedules) == len(tuned_schedules)
             run_schedules = TuningCandidate.get_schedules(random_candidates) + tuned_schedules
 
         if self.search_strategy.validate_schedules:
             logger(logging.INFO, __name__, current_line_number(),
                    f"Runner set includes {get_num_unique_schedules(run_schedules)} unique schedule(s)")
-        # assert len(run_schedules) == sample_num
+        assert get_num_unique_schedules(run_schedules) == len(run_schedules)
         # 14. Assemble the measurement candidates
         return assemble_candidates(run_schedules)
+
+    def get_num_unique_and_unmeasured_schedules(self, schedules: List[Schedule]):
+        """Returns the number of unique and unmeasured programs in a list of Schedules
+
+        Parameters
+        ----------
+        schedules: List[tvm.schedule.Schedule]
+            The list of Schedules
+
+        Returns
+        -------
+        num: int
+            The number of unique Traces in the list of Schedules
+        """
+        unique_programs = {structural_hash(sch.mod) for sch in schedules}
+        return len(unique_programs) - len(self.measured_schedule_hashes.intersection(unique_programs))
 
     def get_num_workload_entries(self) -> int:
         """Retrieve the number of database entries for a given workload (max = 256)
@@ -1901,7 +1920,8 @@ class TuningState:
                                measured_schedule_hashes=self.measured_schedule_hashes)
         tuned_schedules = bo_tuner.tune()
 
-        logger(logging.INFO, __name__, current_line_number(), "Bayesian optimization tuner finished")
+        logger(logging.INFO, __name__, current_line_number(), f"Bayesian optimization tuner finished and returned "
+               f"{self.get_num_unique_and_unmeasured_schedules(tuned_schedules)} unique and unmeasured schedules")
         return tuned_schedules
 
     def sample_initial_population(self, num_schedules: int) -> List[Schedule]:
@@ -1950,7 +1970,7 @@ class TuningState:
             postproc_stats.log(self.context.task_name, current_line_number(),
                                "Sample Initial Population Postproc Summary:")
             logger(logging.INFO, __name__, current_line_number(),
-                   f"Sampled {len(output_schedules)} new random schedules")
+                   f"Sampled {len(output_schedules)} schedules randomly")
             return output_schedules
 
     def notify_runner_results(self, measure_candidates: List[MeasureCandidate], results: List[RunnerResult]):
