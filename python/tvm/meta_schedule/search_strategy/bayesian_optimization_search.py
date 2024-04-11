@@ -1207,29 +1207,47 @@ class BayOptTuner:
             outputs: str = str(inst.outputs).replace(" ", "")
             return f"{outputs}_{name}"
 
-    def get_parameters(self, untuned_sch: Schedule):
+    def get_parameters(self, untuned_sch: Schedule) -> dict:
+        """Extract all possible Bayesian Optimization parameters from a Schedule
+
+        Parameters
+        ----------
+        untuned_sch: tvm.schedule.Schedule
+            The schedule from which to extract the parameters
+
+        Returns
+        -------
+        pbounds: dict
+            The parameters with bounds
+        """
         pbounds = dict()
+
         for inst, decisions in untuned_sch.trace.decisions.items():
-            # print(inst.outputs, inst, decisions)
             if inst.kind.name == "SamplePerfectTile":
+                # 1. Extract information about the instruction
                 n_splits: int = int(inst.attrs[0])
                 max_innermost_factor: int = int(inst.attrs[1])
                 total_loop_iters: int = int(functools.reduce(operator.mul, decisions))
 
-                # Only calculate possible decisions for each pattern once
-                decision_key = ("SamplePerfectTile", n_splits, total_loop_iters)
+                # 2. Instructions with the same decision key share the same possible decisions
+                decision_key = ("SamplePerfectTile", max_innermost_factor, n_splits, total_loop_iters)
                 if decision_key not in decision_lookup:
+                    # 3. Save all possible decisions for the instruction
                     possible_decisions = get_possible_tiling_decisions(total_loop_iters, n_splits,
                                                                        max_innermost_factor)
                     possible_decisions.sort()  # Sort in ascending order, to give the list structure
-                    # print(n_splits, total_loop_iters, possible_decisions)
                     decision_lookup[decision_key] = possible_decisions
 
+                # 4. Get a per Schedule unique name for the instruction
                 inst_dec_tag: str = self.get_parameter_name(inst, decisions)
+                # 5. Set the instruction as a key and the bounds based on the possible decisions as bound
                 pbounds[inst_dec_tag] = (0, len(decision_lookup[decision_key]) - 1)
+                # 6. Connect the instruction name with the decision key
                 self.instruction_decsion_key[inst_dec_tag] = decision_key
             elif inst.kind.name == "SampleCategorical":
+                # 1. Get the instruction name
                 inst_dec_tag: str = self.get_parameter_name(inst, decisions)
+                # 2. Set the instruction name as key and the length of possible decisions as bound
                 pbounds[inst_dec_tag] = (0, len(inst.attrs[0]) - 1)
 
         return pbounds
