@@ -582,7 +582,7 @@ class BayOptTuner:
         self.measured_schedule_hashes = measured_schedule_hashes.copy()
 
         self.log_tuning_traces: bool = False
-        self.instruction_decsion_map: dict = dict()
+        self.instruction_decsion_key: dict = dict()
         self.possible_annotate_decisions: dict[str, List[int]] = dict()
         self.path_optimizer_dir: str = self.get_optimizer_dir_path()
         self.optimizer_save_design_space: bool = True
@@ -767,7 +767,7 @@ class BayOptTuner:
                 # 1. Get the unique tag of the instruction
                 inst_dec_tag: str = self.get_parameter_name(inst, decision)
                 # 2. Get the key corresponding to all instructions with the same possible decision
-                decision_key = self.instruction_decsion_map[inst_dec_tag]
+                decision_key = self.instruction_decsion_key[inst_dec_tag]
                 # 3. Get all possible decisions
                 possible_decisions = decision_lookup[decision_key]
                 # 4. Get the index of the input decision
@@ -1227,7 +1227,7 @@ class BayOptTuner:
 
                 inst_dec_tag: str = self.get_parameter_name(inst, decisions)
                 pbounds[inst_dec_tag] = (0, len(decision_lookup[decision_key]) - 1)
-                self.instruction_decsion_map[inst_dec_tag] = decision_key
+                self.instruction_decsion_key[inst_dec_tag] = decision_key
             elif inst.kind.name == "SampleCategorical":
                 inst_dec_tag: str = self.get_parameter_name(inst, decisions)
                 pbounds[inst_dec_tag] = (0, len(inst.attrs[0]) - 1)
@@ -1278,24 +1278,44 @@ class BayOptTuner:
                                           rand_state=forkseed(self.rand_state),
                                           postproc_stats=self.postproc_stats)
 
-    def build_decision_dict(self, untuned_sch: Schedule, next_decisions) -> dict[Instruction, DECISION_TYPE]:
+    def build_decision_dict(self, untuned_sch: Schedule, next_decisions: dict) -> dict[Instruction, DECISION_TYPE]:
+        """Builds a dictionary of instructions and their decisions based on predictions
+        made by the Bayesian Optimizer
+
+        Parameters
+        ----------
+        untuned_sch: tvm.schedule.Schedule
+            The untuned Schedule for which we predict new decisions
+        next_decisions: dict
+            The decisions suggested by the optimizer
+
+        Returns
+        -------
+        result_decisions: dict[Instruction, DECISION_TYPE]
+            A dictionary containing the instructions and their predicted decisions
+        """
         result_decisions: dict[Instruction, DECISION_TYPE] = dict()
 
         for inst, decisions in untuned_sch.trace.decisions.items():
             if inst.kind.name == "SamplePerfectTile":
-
+                # 1. Get the name of the instruction
                 inst_dec_tag: str = self.get_parameter_name(inst, decisions)
-
-                decision_key = self.instruction_decsion_map[inst_dec_tag]
+                # 2. Get the corresponding key for the lookup table
+                decision_key = self.instruction_decsion_key[inst_dec_tag]
+                # 3. Get all possible decisions for the instruction
                 possible_decisions = decision_lookup[decision_key]
-
+                # 4. Get the BO suggested index for the instruction decision
                 predicted_index = int(next_decisions[inst_dec_tag])
+                # 5. Save the instruction and the chosen decision
                 result_decisions[inst] = possible_decisions[predicted_index]
             elif inst.kind.name == "SampleCategorical":
+                # 1. Get the name of the instruction
                 inst_dec_tag: str = self.get_parameter_name(inst, decisions)
+                # 2. Get the BO suggested decision
                 predicted_decision = int(next_decisions[inst_dec_tag])
-
+                # 3. Create the decision object
                 tvm_object_decision = make_node("IntImm", dtype=String("int32"), value=predicted_decision, span=None)
+                # 5. Save the instruction and the chosen decision
                 result_decisions[inst] = tvm_object_decision
 
         return result_decisions
