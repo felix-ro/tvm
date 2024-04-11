@@ -138,7 +138,7 @@ def get_top_k_schedules(context: "TuneContext", cost_model: CostModel,
         The corresponding scores to the schedules
     """
     with Profiler.timeit("BayOptSearch/GetTopKSchedules"):
-        scores = predict_normalized_scores(schedules, context, cost_model)
+        scores = predict_scores(schedules, context, cost_model)
         idx = np.argsort(scores)[-k:][::-1]
 
         top_schedules: List[Schedule] = []
@@ -165,8 +165,8 @@ def assemble_candidates(picks: List[Schedule]) -> List[MeasureCandidate]:
     return [MeasureCandidate(sch, ArgInfo.from_entry_func(sch.mod, remove_preproc=True)) for sch in picks]
 
 
-def predict_normalized_scores(schedules: List[Schedule], context: "TuneContext",
-                              cost_model: "CostModel") -> List[float]:
+def predict_scores(schedules: List[Schedule], context: "TuneContext",
+                   cost_model: "CostModel") -> List[float]:
     """Predict the normalized score of a list of candidates
 
     Parameters
@@ -617,7 +617,7 @@ class BayOptTuner:
         return filtered_schedules
 
     def tune_single_schedule(self, untuned_sch: Schedule, measured: bool) -> Union[Schedule | TuningReport]:
-        pre_tuning_score = self.predict_normalized_score(untuned_sch)
+        pre_tuning_score = self.predict_score(untuned_sch)
         self.tuning_report.pre_tuning_score = pre_tuning_score
         self.tuning_report.last_tuning_score = pre_tuning_score
 
@@ -908,7 +908,7 @@ class BayOptTuner:
                 continue
 
             # 6. Get cost model scoring for schedule
-            score = self.predict_normalized_score(sch)
+            score = self.predict_score(sch)
 
             # 7. Register score and decisions with optimizer to improve next suggestion
             try:
@@ -1234,7 +1234,7 @@ class BayOptTuner:
 
         return pbounds
 
-    def predict_normalized_score(self, sch: Schedule) -> float:
+    def predict_score(self, sch: Schedule) -> float:
         """Wrapper that allows for score prediction of a single Schedule
 
         Parameters
@@ -1247,9 +1247,9 @@ class BayOptTuner:
         score: float
             The predicted score
         """
-        score = predict_normalized_scores(schedules=[sch],
-                                          context=self.context,
-                                          cost_model=self.cost_model)
+        score = predict_scores(schedules=[sch],
+                               context=self.context,
+                               cost_model=self.cost_model)
         return score[0]
 
     def apply_annotation_to_trace(self, trace: Trace, ann_inst: Instruction,
