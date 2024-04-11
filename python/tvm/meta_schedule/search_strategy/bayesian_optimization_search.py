@@ -1339,15 +1339,27 @@ class TuningState:
         self.workload = database.commit_workload(self.mod)
         self.measured_schedule_hashes = set()
 
-    def filter_schedules(self, schedules: List[Schedule]) -> List[Schedule]:
-        unique_unmeasured_schedules = dict()
+    def remove_measured_schedules(self, schedules: List[Schedule]) -> List[Schedule]:
+        """Remove measured Schedules from a list of Schedules
+
+        Parameters
+        ----------
+        schedules: List[tvm.schedules.Schedules]
+            The list of Schedules to filter
+
+        Returns
+        -------
+        unique_unmeasured_schedules: List[tvm.schedules.Schedules]
+            The list of filtered Schedules
+        """
+        unique_unmeasured_schedules = []
 
         for sch in schedules:
             hashed = structural_hash(sch.mod)
             if hashed not in self.measured_schedule_hashes:
-                unique_unmeasured_schedules[hashed] = sch
+                unique_unmeasured_schedules.append(sch)
 
-        return list(unique_unmeasured_schedules.values())
+        return unique_unmeasured_schedules
 
     def get_work_dir(self) -> str:
         """Retrieves the working directory path
@@ -1369,6 +1381,13 @@ class TuningState:
         self.cost_model = None
 
     def register_measured_schedules(self, schedules: List[Schedule]):
+        """Register measured schedules with the set of hashed Schedules
+
+        Parameters
+        ----------
+        schedules: List[tvm.schedule.Schedule]
+            The list of schedules to register
+        """
         hashed_schedules = [structural_hash(sch.mod) for sch in schedules]
         for hasched_sch in hashed_schedules:
             if hasched_sch not in self.measured_schedule_hashes:
@@ -1614,7 +1633,7 @@ class TuningState:
             raise ValueError("Could not sample a sufficient number of random schedules")
 
         # 8. Remove duplicates
-        unmeasured_schedules = self.filter_schedules(unmeasured_schedules)
+        unmeasured_schedules = self.remove_measured_schedules(unmeasured_schedules)
 
         logger(logging.INFO, __name__, current_line_number(),
                f"Prepared a population of {len(measured_schedules) + len(unmeasured_schedules)} " +
