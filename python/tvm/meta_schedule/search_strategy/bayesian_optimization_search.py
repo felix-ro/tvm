@@ -1163,6 +1163,20 @@ class BayOptTuner:
 
     @staticmethod
     def get_trace_without_tiling_and_categorical_decisions(trace: Trace) -> Trace:
+        """Returns a trace without tiling and categorical decisons
+        (should only be used to get hashable traces that only differ in other
+        instruction decisions)
+
+        Parameters
+        ----------
+        trace: Trace
+            The trace for which we want to remove the decisions
+
+        Returns
+        -------
+        broken_but_clean_trace: Trace
+            The trace without the two instruction decisons
+        """
         # 1. Get the trace without deadcode and convert to json for easier handling
         trace = trace.simplified(True).as_json()
         # 2. Get the current decisions which are at the end of the json trace
@@ -1183,19 +1197,58 @@ class BayOptTuner:
         return trace
 
     def setup_optimizer_dir(self):
+        """Creates the optimizer directory structure"""
         if not os.path.exists(self.path_optimizer_dir):
             os.makedirs(self.path_optimizer_dir)
 
     def get_optimizer_dir_path(self) -> str:
+        """Gets the directory path of the optimizer logs
+
+        Returns
+        -------
+        path: str
+            The path of the optimizer directory
+        """
         work_dir: str = self.work_dir
         return os.path.join(work_dir, "optimizer_logs", self.context.task_name)
 
-    def find_matching_instruction(self, sch: Schedule, inst: Instruction):
+    def find_matching_instruction(self, sch: Schedule, inst: Instruction) -> Instruction:
+        """Finds a matching Instruction in a Schedule
+
+        Parameters
+        ----------
+        sch: tvm.schedule.Schedule
+            The Schedule to find a matching Instruction in
+        inst: Instruction
+            The Instruction for which to find a match
+
+        Returns
+        -------
+        new_inst: tvm.tir.Instruction
+            The matched Instruction
+        """
         for new_inst, _ in sch.trace.decisions.items():
+            # This is rough but seems to work, probably better to do it via get_parameter_name
+            # We cannot compare instructions so this is a workaround
             if str(new_inst.outputs) == str(inst.outputs):
                 return new_inst
 
     def get_parameter_name(self, inst: Instruction, decisions: DECISION_TYPE) -> str:
+        """Get a per Schedule unique name for SamplePerfectTile and SampleCategorical
+        Instructions
+
+        Parameters
+        ----------
+        inst: tvm.tir.Instruction
+            The instruction for which to create a name
+        decisons: DECISION_TYPE
+            The decisions of the instruction
+
+        Returns
+        -------
+        name: str
+            The unique name of the instruction
+        """
         name: str = inst.kind.name
 
         if name == "SamplePerfectTile":
