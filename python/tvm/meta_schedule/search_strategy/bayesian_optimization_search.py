@@ -1,4 +1,4 @@
-from typing import TYPE_CHECKING, List, Optional, Any, Union, Tuple
+from typing import TYPE_CHECKING, List, Optional, Any, Union, Tuple, Callable
 from tvm.tir.schedule import Schedule, Trace, Instruction, BlockRV
 from tvm.tir.analysis import (is_annotate_with_parallel,
                               get_possible_parallel_annotate_decisions,
@@ -296,6 +296,32 @@ def create_schedule_from_trace(mod: IRModule, trace: Trace, postprocs: List["Pos
     return sch
 
 
+def get_task_logger(task_name: str) -> Callable[[int, str, int, str], None]:
+    """Get the logger for a specific task
+
+    Parameters
+    ----------
+    task_name: str
+        The name of the task
+
+    Returns
+    -------
+    log_func: Callable[[int, str, int, str], None]
+        The logging function
+    """
+    # 1. Get the logger
+    logger_dict = logging.Logger.manager.loggerDict
+    logger_names = list(logger_dict.keys())
+    pattern = fr"tvm\.meta_schedule\.logging\.task_\d+_{task_name}$"
+    matching_strings = [s for s in logger_names if re.match(pattern, s)]
+    assert len(matching_strings) == 1
+
+    # 2. Take the first and only logger, (names are shortened to 100 characters see meta_schedule.logging.py)
+    file_logger_obj = get_logger(matching_strings[0][:100])
+    file_logger = get_logging_func(file_logger_obj)
+    return file_logger
+
+
 class TuningCandidate:
     """Candidate class for Schedules to be tuned.
     Keeps track of additional information about a Schedule"""
@@ -396,6 +422,7 @@ class TuningSummary:
 
     def __init__(self):
         self.improvements: List[float] = []
+        self.scores: List[float] = []
 
     def enter_tuning_report(self, tuning_report: TuningReport):
         """Enter a TuningReport into the summary
@@ -415,6 +442,7 @@ class TuningSummary:
             self.improvements.append(tuning_report.last_tuning_score - tuning_report.pre_tuning_score)
             if tuning_report.last_tuning_score > self.best_score:
                 self.best_score = tuning_report.last_tuning_score
+            self.scores.append(tuning_report.last_tuning_score)
 
         self.num_duplicate_points_skipped += tuning_report.num_duplicate_points_skipped
         self.num_points_probed += tuning_report.num_points_probed
@@ -442,6 +470,16 @@ class TuningSummary:
                f"[Tuner] Number of Duplicate Points Skipped: {self.num_duplicate_points_skipped}")
         logger(logging.INFO, __name__, current_line_number(),
                f"[Tuner] Number of Points Probed: {self.num_points_probed}")
+
+    def log_scores(self, task_name: str):
+        task_logger = get_task_logger(task_name=task_name)
+        message = "Scores of returned schedules:\n"
+        for i in range(len(self.scores)):
+            if i != 0 and i % 16 == 0:
+                message += "\n"
+            message += f"{self.scores[i]:.4f}, "
+
+        task_logger(logging.INFO, __name__, current_line_number(), message)
 
 
 def get_compute_location_insts(sch: Schedule) -> List[Instruction]:
@@ -499,15 +537,7 @@ class PostProcessingStatistic:
             Description of what the postprocessing statistic is related to (tuning/sampling)
         """
         # 1. Get the logger
-        logger_dict = logging.Logger.manager.loggerDict
-        logger_names = list(logger_dict.keys())
-        pattern = fr"tvm\.meta_schedule\.logging\.task_\d+_{task_name}$"
-        matching_strings = [s for s in logger_names if re.match(pattern, s)]
-        assert len(matching_strings) == 1
-
-        # 2. Take the first and only logger, (names are shortened to 100 characters see meta_schedule.logging.py)
-        file_logger_obj = get_logger(matching_strings[0][:100])
-        file_logger = get_logging_func(file_logger_obj)
+        file_logger = get_task_logger(task_name=task_name)
 
         # 3. Create message
         message_lines = [f"{intro}"]
@@ -593,7 +623,14 @@ class BayOptTuner:
         if self.optimizer_logging:
             self.setup_optimizer_dir()
 
-    def tune(self) -> Union[Schedule | TuningReport]:
+    def tune(self) -> List[Schedule]:
+        """Starts the tuning process
+
+        Returns
+        -------
+        tuned_schedules: List[tvm.schedule.Schedule]
+            The tuned schedules
+        """
         tuning_summary = TuningSummary()
         tuned_schedules: List[Schedule] = []
         for candidate in self.tune_candidates:
@@ -601,20 +638,20 @@ class BayOptTuner:
             self.tuning_report: TuningReport = TuningReport(candidate.measured, self.is_gpu_target)
             # 2. Send to tuner
             sch, report = self.tune_single_schedule(candidate.sch, candidate.measured)
-            tuned_schedules.append(sch)
-            # 3. Analyse report
-            report.analyse_tuning_report()
-            tuning_summary.enter_tuning_report(report)
+            # 3. Check that we have not measured the schedule before
+            if structural_hash(sch.mod) not in self.measured_schedule_hashes:
+                tuned_schedules.append(sch)
+                # 4. Analyse report
+                report.analyse_tuning_report()
+                tuning_summary.enter_tuning_report(report)
 
+        # 5. Log summary to task scheduler
         tuning_summary.log()
+        # 6. Log additional information to task log
         self.postproc_stats.log(self.context.task_name, current_line_number(), "Tuning Postproc Summary")
+        tuning_summary.log_scores(self.context.task_name)
 
-        filtered_schedules = []
-        for tuned_sch in tuned_schedules:
-            if structural_hash(tuned_sch.mod) not in self.measured_schedule_hashes:
-                filtered_schedules.append(tuned_sch)
-
-        return filtered_schedules
+        return tuned_schedules
 
     def tune_single_schedule(self, untuned_sch: Schedule, measured: bool) -> Union[Schedule | TuningReport]:
         pre_tuning_score = self.predict_score(untuned_sch)
