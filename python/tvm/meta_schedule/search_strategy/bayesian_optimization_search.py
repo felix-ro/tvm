@@ -617,8 +617,7 @@ class BayOptTuner:
         self.path_optimizer_dir: str = self.get_optimizer_dir_path()
         self.optimizer_save_design_space: bool = True
         self.postproc_stats = PostProcessingStatistic()
-        self.max_failures: int = 5000
-        self.max_sch_failure: int = int(self.max_failures / len(self.tune_candidates))
+        self.max_sch_failure: int = self.max_trials
 
         if self.optimizer_logging:
             self.setup_optimizer_dir()
@@ -973,7 +972,7 @@ class BayOptTuner:
 
         # ----------------------------------------------------------------------------------------- #
         # 1. We have finished probing points let's report what we have done
-        self.tuning_report.num_points_probed = current_trial
+        self.tuning_report.num_points_probed = current_trial + failure_count
 
         # 2. If the original schedule was never measured (random schedule), and tuning did not improve
         #    its score we return the original schedule. However, if we have already measured the schedule
