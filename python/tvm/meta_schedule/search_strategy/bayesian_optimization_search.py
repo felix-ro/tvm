@@ -805,13 +805,14 @@ class BayOptTuner:
                 # 1. Get the unique tag of the instruction
                 inst_dec_tag: str = self.get_parameter_name(inst, decision)
                 # 2. Get the key corresponding to all instructions with the same possible decision
-                decision_key = self.instruction_decsion_key[inst_dec_tag]
-                # 3. Get all possible decisions
-                possible_decisions = decision_lookup[decision_key]
-                # 4. Get the index of the input decision
-                decision_index = possible_decisions.index(tuple(decision))
-                # 5. Add index to input decision dictionary
-                input_decisions[inst_dec_tag] = float(decision_index)
+                if inst_dec_tag in self.instruction_decsion_key:
+                    decision_key = self.instruction_decsion_key[inst_dec_tag]
+                    # 3. Get all possible decisions
+                    possible_decisions = decision_lookup[decision_key]
+                    # 4. Get the index of the input decision
+                    decision_index = possible_decisions.index(tuple(decision))
+                    # 5. Add index to input decision dictionary
+                    input_decisions[inst_dec_tag] = float(decision_index)
             elif inst.kind.name == "SampleCategorical":
                 # 1. Get the unique tag of the instruction
                 inst_dec_tag: str = self.get_parameter_name(inst, decision)
@@ -1008,7 +1009,7 @@ class BayOptTuner:
             matched_decisions[matched_inst] = decision
 
         for inst, decision in list(sch.trace.decisions.items()):
-            if inst.kind.name == "SamplePerfectTile":
+            if inst.kind.name == "SamplePerfectTile" and inst in matched_decisions:
                 expected_decision = list(matched_decisions[inst])
                 decision = [int(x) for x in decision]
 
@@ -1330,6 +1331,9 @@ class BayOptTuner:
                     # 3. Save all possible decisions for the instruction
                     possible_decisions = get_possible_tiling_decisions(total_loop_iters, n_splits,
                                                                        max_innermost_factor)
+                    if len(possible_decisions) == 1:
+                        # If there is only one possible decision we do not need to tune it
+                        continue
                     possible_decisions.sort()  # Sort in ascending order, to give the list structure
                     decision_lookup[decision_key] = possible_decisions
 
@@ -1414,13 +1418,15 @@ class BayOptTuner:
                 # 1. Get the name of the instruction
                 inst_dec_tag: str = self.get_parameter_name(inst, decisions)
                 # 2. Get the corresponding key for the lookup table
-                decision_key = self.instruction_decsion_key[inst_dec_tag]
-                # 3. Get all possible decisions for the instruction
-                possible_decisions = decision_lookup[decision_key]
-                # 4. Get the BO suggested index for the instruction decision
-                predicted_index = int(next_decisions[inst_dec_tag])
-                # 5. Save the instruction and the chosen decision
-                result_decisions[inst] = possible_decisions[predicted_index]
+                #    (Instructions with only one possible decision are not included)
+                if inst_dec_tag in self.instruction_decsion_key:
+                    decision_key = self.instruction_decsion_key[inst_dec_tag]
+                    # 3. Get all possible decisions for the instruction
+                    possible_decisions = decision_lookup[decision_key]
+                    # 4. Get the BO suggested index for the instruction decision
+                    predicted_index = int(next_decisions[inst_dec_tag])
+                    # 5. Save the instruction and the chosen decision
+                    result_decisions[inst] = possible_decisions[predicted_index]
             elif inst.kind.name == "SampleCategorical":
                 # 1. Get the name of the instruction
                 inst_dec_tag: str = self.get_parameter_name(inst, decisions)
