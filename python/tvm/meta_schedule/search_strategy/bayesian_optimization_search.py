@@ -365,6 +365,15 @@ class TuningReport:
     num_points_probed: int = 0
 
     def __init__(self, measured: bool, is_gpu_target: bool):
+        """Initialize tuning report
+
+        Parameters
+        ----------
+        measured: bool
+            If the schedule was measured before
+        is_gpu_target: bool
+            If the target device is a gpu
+        """
         self.measured: bool = measured
         self.is_gpu_target: bool = is_gpu_target
 
@@ -472,6 +481,13 @@ class TuningSummary:
                f"[Tuner] Number of Points Probed: {self.num_points_probed}")
 
     def log_scores(self, task_name: str):
+        """Logs the scores of the returned schedule to the log file of the task
+
+        Parameters
+        ----------
+        task_name: str
+            The name of the task
+        """
         task_logger = get_task_logger(task_name=task_name)
         message = "Scores of returned schedules:\n"
         for i in range(len(self.scores)):
@@ -655,17 +671,31 @@ class BayOptTuner:
         return tuned_schedules
 
     def tune_single_schedule(self, untuned_sch: Schedule, measured: bool) -> Union[Schedule | TuningReport]:
+        """Function that moves a single Schedule throught the optimization phases
+
+        Parameters
+        ----------
+        untuned_sch: Schedule
+            The untuned input schedule
+        measured: bool
+            If the input schedule was previously measured
+        """
         pre_tuning_score = self.predict_score(untuned_sch)
         self.tuning_report.pre_tuning_score = pre_tuning_score
         self.tuning_report.last_tuning_score = pre_tuning_score
 
         if self.is_gpu_target:
+            # GPU schedules dont have a parallel or compute location phase
+            # Thus we only need to run it through the BO phase
             with Profiler.timeit("BayOptSearch/Tuner/Tune/BayesianPhase"):
                 finished_sch: Schedule = self.bayesian_phase(untuned_sch, measured)
         elif self.only_tune_parallel_extent:
+            # When seeing a task for the first time it can be time efficient to
+            # only run it through the parallel phase
             with Profiler.timeit("BayOptSearch/Tuner/Tune/ParallelPhase"):
                 finished_sch: Schedule = self.parallel_phase(untuned_sch)
         else:
+            # The CPU scheduling pipeline
             with Profiler.timeit("BayOptSearch/Tuner/Tune/BayesianPhase"):
                 sch_phase_one: Schedule = self.bayesian_phase(untuned_sch, measured)
             with Profiler.timeit("BayOptSearch/Tuner/Tune/ParallelPhase"):
@@ -675,7 +705,25 @@ class BayOptTuner:
 
         return finished_sch, self.tuning_report
 
-    def compute_location_phase(self, sch: Schedule):
+    def compute_location_phase(self, sch: Schedule) -> Schedule:
+        """The compute location phase
+
+        Parameters
+        ----------
+        sch: tvm.schedule.Schedule
+            The input Schedule
+
+        Returns
+        -------
+        tuned_sch: tvm.schedule.Schedule
+            The tuned Schedule
+
+        Notes
+        -----
+        This functions finds all possible compute location instructions and mutates them in a
+        random order. Through this it generates a number of candidates which are scored. The best
+        scoring Schedule is subsequently returned.
+        """
         MAX_CANDIDATES = 64
 
         # 1. Get all compute location insts
@@ -692,13 +740,13 @@ class BayOptTuner:
         # 4. Create the first candidates
         first_inst_index = shuffled_indices[0]
         shuffled_indices.pop(0)
-        candidates: List[Schedule] = self.get_all_mutations_for_compute_location_insts(sch, first_inst_index)
+        candidates: List[Schedule] = self.get_all_mutations_for_compute_location_instruction(sch, first_inst_index)
 
         # 5. Get all or maximum number of combinations in the shuffled order
         for index in shuffled_indices:
             new_candidates = []
             for candidate in candidates:
-                new_candidates.extend(self.get_all_mutations_for_compute_location_insts(candidate, index))
+                new_candidates.extend(self.get_all_mutations_for_compute_location_instruction(candidate, index))
                 if (len(candidates) + len(new_candidates)) >= MAX_CANDIDATES:
                     break
             candidates.extend(new_candidates)
@@ -720,8 +768,23 @@ class BayOptTuner:
                 self.tuning_report.last_tuning_score = top_scores[0]
                 return top_schs[0]
 
-    def get_all_mutations_for_compute_location_insts(self, sch: Schedule,
-                                                     inst_index: int) -> List[Schedule]:
+    def get_all_mutations_for_compute_location_instruction(self, sch: Schedule,
+                                                           inst_index: int) -> List[Schedule]:
+        """Gets all mutations for a selected SampleComputeLocation instruction which is selected
+        via its index in the Schedule's Trace
+
+        Parameters
+        ----------
+        sch: tvm.schedule.Schedule
+            The schedule witht the instruction
+        inst_index: int
+            The index of the instruction in the trace
+
+        Returns
+        -------
+        candidates: List[tvm.schedule.Schedule]
+            The list of mutated Schedules
+        """
         candidates: List[Schedule] = []
         current_index: int = 0
 
@@ -744,9 +807,26 @@ class BayOptTuner:
         return candidates
 
     def parallel_phase(self, sch: Schedule) -> Schedule:
+        """The parallel phase of the optimization process
+
+        Parameters
+        ----------
+        sch: tvm.schedule.Schedule
+            The input Schedule
+
+        Returns
+        -------
+        tuned_sch: tvm.schedule.Schedule
+            The tuned Schedule
+
+        Notes
+        -----
+        This phase prepares all possible parallel annotations, scores them,
+        and returns the best one.
+        """
         possible_decision_dict: dict[Instruction, List[int]] = dict()
 
-        # Find all parallel annotations and possible decisions
+        # 1. Find all parallel annotations and possible decisions
         for inst in sch.trace.insts:
             if (is_annotate_with_parallel(inst)):
                 possible_decisions = list(get_possible_parallel_annotate_decisions(
@@ -758,11 +838,11 @@ class BayOptTuner:
                 if len(possible_decisions) != 0:
                     possible_decision_dict[inst] = possible_decisions
 
-        # Return if no annotation
+        # 2. Return if no annotation
         if not bool(possible_decision_dict):
             return sch
 
-        # Prepare all combinations
+        # 3. Prepare all combinations
         schedules: List[Schedule] = []
         for inst, possible_decisions in list(possible_decision_dict.items()):
             for decision in possible_decisions:
@@ -773,10 +853,10 @@ class BayOptTuner:
                 if new_sch is not None:
                     schedules.append(new_sch)
 
-        # Return the best combination
+        # 4. Return the best combination
         bests, top_scores = get_top_k_schedules(self.context, self.cost_model, schedules, 1)
 
-        # if top score worse than phase one score, return phase one schedule
+        # 5. If top score worse than phase one score, return phase one schedule
         if top_scores[0] <= self.tuning_report.last_tuning_score:
             return sch
         else:
@@ -844,6 +924,28 @@ class BayOptTuner:
 
     def get_next_decision(self, optimizer: BayesianOptimization, acq_func: UtilityFunction,
                           probed_discrete_points: set[str]) -> Optional[dict]:
+        """Get the next point to probe from the optimizer
+
+        Parameters
+        ----------
+        optimizer: bayes_opt.BayesianOptimization
+            The Bayesian Optimizer
+        acq_func: bayes_opt.UtilityFunction
+            The selected utility function
+        probed_discrete_points: set[int]
+            The set of discrete points already probed
+
+        Returns
+        -------
+        next_decision: Optional[dict]
+            The next decision if an unprobed point can be found
+
+        Notes
+        -----
+        This function will register the probed decision in the set. Important: points are discrete in the set
+        which allows us to skip floating point values that would round to the same int (producing the same Schedule).
+        This is a workaround for the limitations of the optimizer library.
+        """
         new_decision = False
         next_decision = None
         iteration = 0
@@ -995,6 +1097,20 @@ class BayOptTuner:
         return max_schedule
 
     def get_schedule_with_predicted_decisons(self, untuned_sch: Schedule, next_decisions: dict) -> Optional[Schedule]:
+        """Returns the Schedule with the suggested decisions
+
+        Parameters
+        ----------
+        untuned_sch: tvm.schedule.Schedule
+            The Schedule the suggested decisions are based upon
+        next_decisions: dict
+            The dictionary containing the suggested decisions
+
+        Returns
+        -------
+        applied_schedule: Optional[Schedule]
+            The Schedule with the suggested decisions if application was successful
+        """
         decisions: dict[Instruction, DECISION_TYPE] = self.build_decision_dict(untuned_sch, next_decisions)
         tuned_schedule: Optional[Schedule] = self.apply_decisions(untuned_sch, decisions)
 
@@ -1003,6 +1119,15 @@ class BayOptTuner:
         return tuned_schedule
 
     def validate_tuning_decision_application(self, sch: Schedule, decisions: dict[Instruction, DECISION_TYPE]):
+        """Logs if not all suggested decisions were applied to the Schedule
+
+        Parameters
+        ----------
+        sch: tvm.schedule.Schedule
+            The Schedule in which to look for the decisions
+        decisions: dict[Instruction, DECISION_TYPE]
+            The instructions and decisions to look for
+        """
         matched_decisions: dict[Instruction, DECISION_TYPE] = dict()
         for inst, decision in list(decisions.items()):
             matched_inst = self.find_matching_instruction(sch=sch, inst=inst)
@@ -1028,19 +1153,41 @@ class BayOptTuner:
 
     def apply_decisions(self, untuned_sch: Schedule,
                         decisions: dict[Instruction, DECISION_TYPE]) -> Optional[Schedule]:
-        # Get the schedules trace
+        """Applies decisions to a trace
+
+        Parameters
+        ----------
+        untuned_sch: tvm.schedule.Schedule
+            The input schedule
+        decisions: dict[Instruction, DECISION_TYPE]
+            The instructions and their decisions
+
+        Returns
+        -------
+        The Schedule with the decisions if application was successful
+        """
+        # 1. Get the schedules trace
         trace: Trace = untuned_sch.trace
 
-        # Apply the decisions to the trace
+        # 2. Apply the decisions to the trace
         for inst, decision in list(decisions.items()):
             trace = trace.with_decision(inst=inst, decision=decision, remove_postproc=True)
 
-        # Create a new schedule from the updated trace and return it
+        # 3. Create a new schedule from the updated trace and return it
         return create_schedule_from_trace(mod=self.mod, trace=trace, postprocs=self.postprocs,
                                           rand_state=forkseed(self.rand_state),
                                           postproc_stats=self.postproc_stats)
 
     def post_tuning_log_copy(self, tuned_sch: Schedule, untuned_sch: Schedule):
+        """Legacy function needed when each unique trace has its own optimizer
+
+        Parameters
+        ----------
+        tuned_sch: tvm.schedule.Schedule
+            The tuned schedule
+        untuned_sch: tvm.schedule.Schedule
+            The untuned schedule
+        """
         if self.optimizer_logging and not self.optimizer_save_design_space:
             # Save optimizer log with new trace id
             new_trace_id = create_hash(str(tuned_sch.trace))
@@ -1986,6 +2133,7 @@ class TuningState:
 
 @derived_object
 class BayesianOptimizationSearch(PySearchStrategy):
+    """The Bayesian Optimization Search Strategy"""
     context: "TuneContext" = None
     state: TuningState = None
 
@@ -1999,6 +2147,7 @@ class BayesianOptimizationSearch(PySearchStrategy):
     is_gpu_target: bool = False
 
     def __init__(self):
+        """Initializes some of the settings with the default values if no environment variables are set"""
         self.max_optimizer_entries: int = int(os.getenv("TVM_BO_MAX_OPTIMIZER_ENTRIES", "500"))
         self.use_sequential_domain_reduction: bool = (
             os.getenv("TVM_BO_USE_SEQUENTIAL_DOMAIN_REDUCTION", "False") == "True"
