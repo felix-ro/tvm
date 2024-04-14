@@ -606,7 +606,8 @@ class BayOptTuner:
                  acquisition_func_kind: str,
                  kappa: float,
                  xi: float,
-                 measured_schedule_hashes: set[int]):
+                 measured_schedule_hashes: set[int],
+                 register_failure_points: bool):
         self.tune_candidates: List[TuningCandidate] = tune_candidates
         self.validate_schedules: bool = validate_schedules
         self.max_trials: int = max_trials
@@ -626,6 +627,7 @@ class BayOptTuner:
         self.kappa: float = kappa
         self.xi: float = xi
         self.measured_schedule_hashes = measured_schedule_hashes.copy()
+        self.register_failure_points = register_failure_points
 
         self.log_tuning_traces: bool = False
         self.instruction_decsion_key: dict = dict()
@@ -1052,15 +1054,16 @@ class BayOptTuner:
                 score = self.predict_score(sch)
 
             # 6. Register score and decisions with optimizer to improve next suggestion
-            try:
-                optimizer.register(
-                    params=next_decisions,
-                    target=score,
-                )
-            except NotUniqueError as e:
-                # 7. We should not get duplicates here
-                logger(logging.ERROR, __name__, current_line_number(),
-                       f"BO tried to register a duplicate point: {e}")
+            if score > 0 or self.register_failure_points:
+                try:
+                    optimizer.register(
+                        params=next_decisions,
+                        target=score,
+                    )
+                except NotUniqueError as e:
+                    # 7. We should not get duplicates here
+                    logger(logging.ERROR, __name__, current_line_number(),
+                           f"BO tried to register a duplicate point: {e}")
 
             # 8. Save the score and schedule if its a new best
             if score >= max_score:
@@ -2069,7 +2072,8 @@ class TuningState:
                                acquisition_func_kind=self.search_strategy.acquisition_func_kind,
                                kappa=self.search_strategy.kappa,
                                xi=self.search_strategy.xi,
-                               measured_schedule_hashes=self.measured_schedule_hashes)
+                               measured_schedule_hashes=self.measured_schedule_hashes,
+                               register_failure_points=self.search_strategy.register_failure_points)
         tuned_schedules = bo_tuner.tune()
 
         logger(logging.INFO, __name__, current_line_number(), f"Bayesian optimization tuner finished and returned "
@@ -2156,6 +2160,7 @@ class BayesianOptimizationSearch(PySearchStrategy):
         self.acquisition_func_kind: str = os.getenv("TVM_BO_ACQUISITION_FUNCTION", "ucb")
         self.kappa: float = float(os.getenv("TVM_BO_KAPPA", "5"))
         self.xi: float = float(os.getenv("TVM_BO_XI", "0.1"))
+        self.register_failure_points: bool = os.getenv("TVM_BO_REGISTER_FAILURE_POINTS", "False") == "True"
 
     def _initialize_with_tune_context(self, context: "TuneContext") -> None:
         """Initialize the search strategy with tuning context.
