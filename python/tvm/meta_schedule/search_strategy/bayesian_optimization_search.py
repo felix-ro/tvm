@@ -33,6 +33,7 @@ import os
 import shutil
 import json
 import re
+import heapq
 
 from bayes_opt import BayesianOptimization, UtilityFunction, SequentialDomainReductionTransformer
 from bayes_opt.logger import JSONLogger
@@ -363,6 +364,7 @@ class TuningReport:
     num_tuneable_insts: int = None
     num_duplicate_points_skipped: int = 0
     num_points_probed: int = 0
+    num_failures: int = 0
 
     def __init__(self, measured: bool, is_gpu_target: bool):
         """Initialize tuning report
@@ -411,7 +413,7 @@ class TuningReport:
                    "Bayesian Optimization may not be effective.")
         elif self.tune_failure:
             logger(logging.DEBUG, __name__, current_line_number(),
-                   "Failed to apply tuning decisions to trace")
+                   f"Experienced {self.num_failures} failure(s) and did not find a viable schedule")
         elif self.optimizer_failure:
             logger(logging.ERROR, __name__, current_line_number(),
                    "Optimizer failed to predict an unprobed point")
@@ -586,6 +588,17 @@ def find_file_with_suffix(directory_path: str, suffix: str) -> List[str]:
     return matching_files
 
 
+class ScoredSchedule:
+    """Object that stores a schedule with its cost model score
+    and introduces ordering"""
+    def __init__(self, score: float, sch: Schedule):
+        self.score = score
+        self.sch = sch
+
+    def __lt__(self, other):
+        return self.score < other.score
+
+
 class BayOptTuner:
     def __init__(self,
                  tune_candidates: List[TuningCandidate],
@@ -607,7 +620,8 @@ class BayOptTuner:
                  kappa: float,
                  xi: float,
                  measured_schedule_hashes: set[int],
-                 register_failure_points: bool):
+                 register_failure_points: bool,
+                 use_min_heap: bool):
         self.tune_candidates: List[TuningCandidate] = tune_candidates
         self.validate_schedules: bool = validate_schedules
         self.max_trials: int = max_trials
@@ -626,8 +640,8 @@ class BayOptTuner:
         self.acquisition_func_kind: str = acquisition_func_kind
         self.kappa: float = kappa
         self.xi: float = xi
-        self.measured_schedule_hashes = measured_schedule_hashes.copy()
-        self.register_failure_points = register_failure_points
+        self.measured_schedule_hashes: set = measured_schedule_hashes.copy()
+        self.register_failure_points: bool = register_failure_points
 
         self.log_tuning_traces: bool = False
         self.instruction_decsion_key: dict = dict()
@@ -636,6 +650,10 @@ class BayOptTuner:
         self.optimizer_save_design_space: bool = True
         self.postproc_stats = PostProcessingStatistic()
         self.max_sch_failure: int = self.max_trials
+
+        self.top_schedule_heap: List[ScoredSchedule] = []
+        self.max_heap_size: int = len(self.tune_candidates)
+        self.use_min_heap: bool = use_min_heap
 
         if self.optimizer_logging:
             self.setup_optimizer_dir()
@@ -654,25 +672,52 @@ class BayOptTuner:
             # 1. Initialize tuning report
             self.tuning_report: TuningReport = TuningReport(candidate.measured, self.is_gpu_target)
             # 2. Send to tuner
-            sch, report = self.tune_single_schedule(candidate.sch, candidate.measured)
+            sch = self.tune_single_schedule(candidate.sch, candidate.measured)
             # 3. Check that we have not measured the schedule before
             hash: int = structural_hash(sch.mod)
             if hash not in self.measured_schedule_hashes:
                 tuned_schedules.append(sch)
                 self.measured_schedule_hashes.add(hash)
                 # 4. Analyse report
-                report.analyse_tuning_report()
-                tuning_summary.enter_tuning_report(report)
+                self.tuning_report.analyse_tuning_report()
+                tuning_summary.enter_tuning_report(self.tuning_report)
 
         # 5. Log summary to task scheduler
         tuning_summary.log()
         # 6. Log additional information to task log
         self.postproc_stats.log(self.context.task_name, current_line_number(), "Tuning Postproc Summary")
         tuning_summary.log_scores(self.context.task_name)
-
         return tuned_schedules
 
-    def tune_single_schedule(self, untuned_sch: Schedule, measured: bool) -> Union[Schedule | TuningReport]:
+    def tune_min_heap(self):
+        """Starts the tuning process using a min heap to keep track of the top-k scores
+        across all probed points
+
+        Returns
+        -------
+        min_heap_schedules: List[tvm.schedule.Schedule]
+            The tuned schedules
+        """
+        tuning_summary = TuningSummary()
+        for candidate in self.tune_candidates:
+            # 1. Initialize tuning report
+            self.tuning_report: TuningReport = TuningReport(candidate.measured, self.is_gpu_target)
+            # 2. Send to tuner
+            self.tune_single_schedule(candidate.sch, candidate.measured)
+            tuning_summary.enter_tuning_report(self.tuning_report)
+            self.tuning_report.analyse_tuning_report()
+
+        # 3. Log summary to task scheduler
+        tuning_summary.log()
+        # 4. Log additional information to task log
+        self.postproc_stats.log(self.context.task_name, current_line_number(), "Tuning Postproc Summary")
+
+        # 5. Using the mean heap will return the self.max_heap_size number of schedules seen during probing
+        min_heap_schedules: List[Schedule] = [scored_sch.sch for scored_sch in self.top_schedule_heap]
+        self.min_heap_log_scores()
+        return min_heap_schedules
+
+    def tune_single_schedule(self, untuned_sch: Schedule, measured: bool) -> Schedule:
         """Function that moves a single Schedule throught the optimization phases
 
         Parameters
@@ -681,10 +726,18 @@ class BayOptTuner:
             The untuned input schedule
         measured: bool
             If the input schedule was previously measured
+
+        Returns
+        -------
+        tuned_sch: tvm.schedule.Schedule
+            The tuned schedule
         """
         pre_tuning_score = self.predict_score(untuned_sch)
         self.tuning_report.pre_tuning_score = pre_tuning_score
         self.tuning_report.last_tuning_score = pre_tuning_score
+
+        if self.use_min_heap and not measured:
+            self.push_to_heap(ScoredSchedule(pre_tuning_score, untuned_sch))
 
         if self.is_gpu_target:
             # GPU schedules dont have a parallel or compute location phase
@@ -705,7 +758,42 @@ class BayOptTuner:
             with Profiler.timeit("BayOptSearch/Tuner/Tune/ComputeLocationPhase"):
                 finished_sch: Schedule = self.compute_location_phase(sch_phase_two)
 
-        return finished_sch, self.tuning_report
+        return finished_sch
+
+    def push_to_heap(self, scored_sch: ScoredSchedule):
+        """Push a schedule to the heap
+
+        Parameters
+        ----------
+        scored_sch: ScoredSchedule
+            The scored Schedule
+
+        Notes
+        -----
+        Schedules are only added to the heap if the schedule has not been measured already and
+        the score is better than the worst score in the heap. Also note this function will
+        maintain the max size of the heap.
+        """
+        with Profiler.timeit("BayOptSearch/Tuner/Tune/PushToHeap"):
+            hash = structural_hash(scored_sch.sch.mod)
+            if hash not in self.measured_schedule_hashes:
+                self.measured_schedule_hashes.add(hash)
+                heapq.heappush(self.top_schedule_heap, scored_sch)
+                if len(self.top_schedule_heap) > self.max_heap_size:
+                    heapq.heappop(self.top_schedule_heap)
+
+    def min_heap_log_scores(self):
+        """Logs the scores of the Schedules in the heap"""
+        task_logger = get_task_logger(self.context.task_name)
+
+        message = "Scores of returned schedules:\n"
+        scores: List[float] = [scored_sch.score for scored_sch in self.top_schedule_heap]
+        for i in range(len(self.top_schedule_heap)):
+            if i != 0 and i % 16 == 0:
+                message += "\n"
+            message += f"{scores[i]:.4f}, "
+
+        task_logger(logging.INFO, __name__, current_line_number(), message)
 
     def compute_location_phase(self, sch: Schedule) -> Schedule:
         """The compute location phase
@@ -760,7 +848,12 @@ class BayOptTuner:
             return sch
         else:
             # Get the top schedule and score (returned in lists, be careful)
-            top_schs, top_scores = get_top_k_schedules(self.context, self.cost_model, candidates, 0)
+            top_schs, top_scores = get_top_k_schedules(self.context, self.cost_model, candidates, len(candidates))
+
+            # If we use a min heap add the schedules
+            if self.use_min_heap:
+                for sch_, score_ in zip(top_schs, top_scores):
+                    self.push_to_heap(ScoredSchedule(score_, sch_))
 
             if top_scores[0] <= self.tuning_report.last_tuning_score:
                 # If best score worse than before this phase return old schedule
@@ -854,17 +947,24 @@ class BayOptTuner:
                                                                    mod=self.mod)
                 if new_sch is not None:
                     schedules.append(new_sch)
+                else:
+                    self.tuning_report.num_failures += 1
 
         # 4. Return the best combination
-        bests, top_scores = get_top_k_schedules(self.context, self.cost_model, schedules, 1)
+        top_schs, top_scores = get_top_k_schedules(self.context, self.cost_model, schedules, len(schedules))
 
-        # 5. If top score worse than phase one score, return phase one schedule
+        # 5. If we use a min heap add the schedules
+        if self.use_min_heap:
+            for sch_, score_ in zip(top_schs, top_scores):
+                self.push_to_heap(ScoredSchedule(score_, sch_))
+
+        # 6. If top score worse than phase one score, return phase one schedule
         if top_scores[0] <= self.tuning_report.last_tuning_score:
             return sch
         else:
             self.tuning_report.phase_two_tuning_score = top_scores[0]
             self.tuning_report.last_tuning_score = top_scores[0]
-            return bests[0]
+            return top_schs[0]
 
     def get_decisions(self, sch: Schedule) -> dict:
         """Retrieves the decision dictionary that identifies the trace and
@@ -1052,6 +1152,9 @@ class BayOptTuner:
                 score = 0.0
             else:
                 score = self.predict_score(sch)
+                # If we use a min heap save the schedule here
+                if self.use_min_heap:
+                    self.push_to_heap(ScoredSchedule(score, sch))
 
             # 6. Register score and decisions with optimizer to improve next suggestion
             if score > 0 or self.register_failure_points:
@@ -1079,6 +1182,7 @@ class BayOptTuner:
         # ----------------------------------------------------------------------------------------- #
         # 1. We have finished probing points let's report what we have done
         self.tuning_report.num_points_probed = current_trial + failure_count
+        self.tuning_report.num_failures = failure_count
 
         # 2. If the original schedule was never measured (random schedule), and tuning did not improve
         #    its score we return the original schedule. However, if we have already measured the schedule
@@ -1090,8 +1194,6 @@ class BayOptTuner:
         # 3. If code validation fails more than self.max_sch_failure we have a tune failure
         if max_schedule is None:
             self.tuning_report.tune_failure = True
-            logger(logging.DEBUG, __name__, current_line_number(),
-                   f"Experienced {failure_count} failure(s) and did not find a viable schedule")
             return input_sch
 
         # 4. Save the tuning score
@@ -2073,8 +2175,13 @@ class TuningState:
                                kappa=self.search_strategy.kappa,
                                xi=self.search_strategy.xi,
                                measured_schedule_hashes=self.measured_schedule_hashes,
-                               register_failure_points=self.search_strategy.register_failure_points)
-        tuned_schedules = bo_tuner.tune()
+                               register_failure_points=self.search_strategy.register_failure_points,
+                               use_min_heap=self.search_strategy.use_min_heap)
+
+        if self.search_strategy.use_min_heap:
+            tuned_schedules: List[Schedule] = bo_tuner.tune_min_heap()
+        else:
+            tuned_schedules: List[Schedule] = bo_tuner.tune()
 
         logger(logging.INFO, __name__, current_line_number(), f"Bayesian optimization tuner finished and returned "
                f"{self.get_num_unique_and_unmeasured_schedules(tuned_schedules)} unique and unmeasured schedules")
@@ -2161,6 +2268,7 @@ class BayesianOptimizationSearch(PySearchStrategy):
         self.kappa: float = float(os.getenv("TVM_BO_KAPPA", "5"))
         self.xi: float = float(os.getenv("TVM_BO_XI", "0.1"))
         self.register_failure_points: bool = os.getenv("TVM_BO_REGISTER_FAILURE_POINTS", "False") == "True"
+        self.use_min_heap: bool = os.getenv("TVM_BO_USE_MIN_HEAP", "False") == "True"
 
     def _initialize_with_tune_context(self, context: "TuneContext") -> None:
         """Initialize the search strategy with tuning context.
