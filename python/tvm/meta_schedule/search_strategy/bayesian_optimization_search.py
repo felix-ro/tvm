@@ -34,17 +34,21 @@ import shutil
 import json
 import re
 import heapq
+import warnings
+import torch
 
 from bayes_opt import BayesianOptimization, UtilityFunction, SequentialDomainReductionTransformer
-from bayes_opt.logger import JSONLogger
-from bayes_opt.event import Events
-from bayes_opt.util import load_logs, NotUniqueError
+from bayes_opt.util import NotUniqueError
+from ax.service.ax_client import AxClient, ObjectiveProperties
 
 DECISION_TYPE = Any
 ATTR_TYPE = Any
 
 decision_lookup = dict()
 logger = get_logging_func(get_logger(__name__))
+
+warnings.simplefilter(action='ignore', category=FutureWarning)
+warnings.simplefilter(action='ignore', category=Warning)
 
 
 def create_hash(input_string: str) -> str:
@@ -1053,7 +1057,8 @@ class BayOptTuner:
         iteration = 0
         while not new_decision and iteration < 15:
             iteration += 1
-            possible_decision: dict = optimizer.suggest(acq_func)
+            # possible_decision: dict = optimizer.suggest(acq_func)
+            possible_decision, trial_index = optimizer.get_next_trial()
             suggested_decision_values = list(possible_decision.values())
             discrete_decision_points = create_hash(str([int(x) for x in suggested_decision_values]))
             if discrete_decision_points not in probed_discrete_points:
@@ -1063,7 +1068,7 @@ class BayOptTuner:
             else:
                 self.tuning_report.num_duplicate_points_skipped += 1
 
-        return next_decision
+        return next_decision, trial_index
 
     def bayesian_phase(self, input_sch: Schedule, measured: bool) -> Schedule:
         """ The Bayesian Optimization phase
@@ -1085,17 +1090,21 @@ class BayOptTuner:
         # 1. Extract the parameters from the input schedule
         pbounds = self.get_parameters(untuned_sch=input_sch)
 
+        parameters = []
+        for name, bounds in pbounds.items():
+            parameters.append({"name": name, "type": "range", "bounds": list(bounds), "value_type": "int"})
+
         # 2. Set and check the number of tuneable instructions
         self.tuning_report.num_tuneable_insts = len(pbounds)
         if self.tuning_report.num_tuneable_insts == 0:
             return input_sch
 
-        # 3. Set up sequential domain reduction
+        # # 3. Set up sequential domain reduction
         bounds_transformer = None
         if self.use_sequential_domain_reduction:
             bounds_transformer = SequentialDomainReductionTransformer(minimum_window=1)
 
-        # 4. Construct the optimizer
+        # # 4. Construct the optimizer
         optimizer = BayesianOptimization(
             f=None,
             pbounds=pbounds,
@@ -1105,10 +1114,32 @@ class BayOptTuner:
             bounds_transformer=bounds_transformer
         )
 
+        trace_id: str = self.get_optimizer_trace_id(input_sch)
+
+        # 3. Get the corresponding (most recent) log file
+        file_path, log_index = self.get_most_recent_log_file(trace_id)
+
+        if os.path.exists(file_path):
+            with warnings.catch_warnings():
+                ax_client = (
+                    AxClient.load_from_json_file(file_path)
+                )
+                # ax_logger = logging.getLogger("ax.service.ax_client")
+                # ax_logger.setLevel(logging.WARNING)
+        else:
+            ax_client = AxClient(
+                enforce_sequential_optimization=True,
+                random_seed=forkseed(self.rand_state),
+                verbose_logging=True)
+            ax_client.create_experiment(name=str(self.context.task_name),
+                                        parameters=parameters,
+                                        objectives={"accuracy": ObjectiveProperties(minimize=False)})
+
+        ax_client.generation_strategy._steps[1].model_kwargs = \
+            {"torch_dtype": torch.float32, "torch_device": torch.device("mps")}
+
         # 5. Set up the optimizer logging and read back probed points
         probed_discrete_points: set[str] = set()
-        optimizer = self.configure_optimizer_logging(untuned_sch=input_sch, optimizer=optimizer,
-                                                     probed_discrete_points=probed_discrete_points)
 
         # 6. Get the acquisition function (UtilityFunction)
         acq_func: UtilityFunction = self.get_acquisition_function()
@@ -1137,7 +1168,7 @@ class BayOptTuner:
         failure_count: int = 0  # The number of created schedules that failed post processing
         while (current_trial < self.max_trials and failure_count < self.max_sch_failure):
             # 2. Get new decisions to probe
-            next_decisions: Optional[dict] = self.get_next_decision(optimizer, acq_func, probed_discrete_points)
+            next_decisions, trial_index = self.get_next_decision(ax_client, acq_func, probed_discrete_points)
 
             # 3. Check that the optimizer did not fail to suggest a new point
             if next_decisions is None:
@@ -1159,10 +1190,7 @@ class BayOptTuner:
             # 6. Register score and decisions with optimizer to improve next suggestion
             if score > 0 or self.register_failure_points:
                 try:
-                    optimizer.register(
-                        params=next_decisions,
-                        target=score,
-                    )
+                    ax_client.complete_trial(trial_index=trial_index, raw_data=score)
                 except NotUniqueError as e:
                     # 7. We should not get duplicates here
                     logger(logging.ERROR, __name__, current_line_number(),
@@ -1195,6 +1223,8 @@ class BayOptTuner:
         if max_schedule is None:
             self.tuning_report.tune_failure = True
             return input_sch
+
+        self.configure_optimizer_logging(untuned_sch=input_sch, optimizer=ax_client)
 
         # 4. Save the tuning score
         self.tuning_report.phase_one_tuning_score = max_score
@@ -1403,8 +1433,7 @@ class BayOptTuner:
             os.replace(temp_file_path, file_path)
 
     def configure_optimizer_logging(self, untuned_sch: Schedule,
-                                    optimizer: BayesianOptimization,
-                                    probed_discrete_points: set[str]) -> BayesianOptimization:
+                                    optimizer: BayesianOptimization) -> BayesianOptimization:
         """Configures the logging behavior of the optimizer
 
         Parameters
@@ -1432,29 +1461,20 @@ class BayOptTuner:
         file_path, log_index = self.get_most_recent_log_file(trace_id)
 
         # 4. If logs exists load them
-        if os.path.exists(file_path):
-            # 5. Get the number of entries in the file
-            with open(file_path, 'r') as file:
-                num_entries = sum(1 for line in file)
+        # if os.path.exists(file_path):
+        #     # 5. Get the number of entries in the file
+        #     with open(file_path, 'r') as file:
+        #         num_entries = sum(1 for line in file)
 
-            # 6. Select the desired logging behavior
-            if self.max_optimizer_entries < num_entries and not self.restricted_memory_logging:
-                # 7. Start a new log file when limit is reached
-                file_path = os.path.join(self.path_optimizer_dir, f"log_{trace_id}_{log_index + 1}.json")
-            elif self.max_optimizer_entries < num_entries and self.restricted_memory_logging:
-                # 8. Remove the first entries from old log file to make space for new entries
-                num_remove = num_entries - self.max_optimizer_entries + self.max_trials
-                BayOptTuner.remove_first_k_log_entries(file_path=file_path, k=num_remove)
-            else:
-                # 9. Continue logging to file
-                load_logs(optimizer, logs=file_path)
-                BayOptTuner.register_discrete_points(probed_discrete_points, file_path)
-
-        # 10. Finalize settings
-        logger = JSONLogger(path=file_path, reset=False)
-        optimizer.subscribe(Events.OPTIMIZATION_STEP, logger)
-        self.optimizer_file_path = file_path
-        return optimizer
+        #     # 6. Select the desired logging behavior
+        #     if self.max_optimizer_entries < num_entries and not self.restricted_memory_logging:
+        #         # 7. Start a new log file when limit is reached
+        #         file_path = os.path.join(self.path_optimizer_dir, f"log_{trace_id}_{log_index + 1}.json")
+        #     elif self.max_optimizer_entries < num_entries and self.restricted_memory_logging:
+        #         # 8. Remove the first entries from old log file to make space for new entries
+        #         num_remove = num_entries - self.max_optimizer_entries + self.max_trials
+        #         BayOptTuner.remove_first_k_log_entries(file_path=file_path, k=num_remove)
+        optimizer.save_to_json_file(file_path)
 
     @staticmethod
     def get_trace_without_tiling_and_categorical_decisions(trace: Trace) -> Trace:
@@ -1505,7 +1525,7 @@ class BayOptTuner:
             The path of the optimizer directory
         """
         work_dir: str = self.work_dir
-        return os.path.join(work_dir, "optimizer_logs", self.context.task_name)
+        return os.path.join(work_dir, "optimizer_logs", str(self.context.task_name))
 
     def find_matching_instruction(self, sch: Schedule, inst: Instruction) -> Instruction:
         """Finds a matching Instruction in a Schedule
