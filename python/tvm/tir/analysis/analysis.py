@@ -468,7 +468,7 @@ def get_possible_parallel_annotate_decisions(sch: Schedule, trace: Trace, rand_s
 
 
 def collect_compute_location_indices(sch: Schedule, block: BlockRV) -> List[IntImm]:
-    """Collect all the feasible compute-at location incdices of the input block
+    """Collect all the feasible compute-at location indices of the input block
 
     Parameters
     ----------
