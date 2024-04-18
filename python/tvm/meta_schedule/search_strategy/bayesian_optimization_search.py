@@ -1445,6 +1445,7 @@ class BayOptTuner:
                 # 8. Remove the first entries from old log file to make space for new entries
                 num_remove = num_entries - self.max_optimizer_entries + self.max_trials
                 BayOptTuner.remove_first_k_log_entries(file_path=file_path, k=num_remove)
+                load_logs(optimizer, logs=file_path)
             else:
                 # 9. Continue logging to file
                 load_logs(optimizer, logs=file_path)
