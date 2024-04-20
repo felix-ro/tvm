@@ -453,7 +453,7 @@ class TuningSummary:
             self.improvements.append(tuning_report.last_tuning_score - tuning_report.pre_tuning_score)
             if tuning_report.last_tuning_score > self.best_score:
                 self.best_score = tuning_report.last_tuning_score
-            self.scores.append(tuning_report.last_tuning_score)
+        self.scores.append(tuning_report.last_tuning_score)
 
         self.num_duplicate_points_skipped += tuning_report.num_duplicate_points_skipped
         self.num_points_probed += tuning_report.num_points_probed
@@ -482,22 +482,46 @@ class TuningSummary:
         logger(logging.INFO, __name__, current_line_number(),
                f"[Tuner] Number of Points Probed: {self.num_points_probed}")
 
-    def log_scores(self, task_name: str):
+    def log_scores(self, task_name: str, work_dir: str):
         """Logs the scores of the returned schedule to the log file of the task
 
         Parameters
         ----------
         task_name: str
             The name of the task
+        work_dir: str
+            The work directory to save scores to
         """
+        csv_message = ""
         task_logger = get_task_logger(task_name=task_name)
         message = "Scores of returned schedules:\n"
         for i in range(len(self.scores)):
             if i != 0 and i % 16 == 0:
                 message += "\n"
             message += f"{self.scores[i]:.4f}, "
+            csv_message += f"{self.scores[i]:.4f},{task_name}\n"
 
         task_logger(logging.INFO, __name__, current_line_number(), message)
+        log_scores_for_stats(work_dir, csv_message)
+
+
+def log_scores_for_stats(work_dir: str, score_message):
+    """Logs scores to a csv file to create statistics with
+
+    Parameters
+    ----------
+    work_dir: str
+        The work directory to save the csv file to
+    score_message: str
+        The score message to save
+    """
+    file_name = "returned_tuner_scores.csv"
+    file_path = os.path.join(work_dir, file_name)
+    if not os.path.exists(file_path):
+        with open(file_path, "w") as f:
+            f.write("Scores,Task Name\n")
+    with open(file_path, "+a") as f:
+        f.write(score_message)
 
 
 def get_compute_location_insts(sch: Schedule) -> List[Instruction]:
@@ -686,7 +710,7 @@ class BayOptTuner:
         tuning_summary.log()
         # 6. Log additional information to task log
         self.postproc_stats.log(self.context.task_name, current_line_number(), "Tuning Postproc Summary")
-        tuning_summary.log_scores(self.context.task_name)
+        tuning_summary.log_scores(self.context.task_name, self.work_dir)
         return tuned_schedules
 
     def tune_min_heap(self):
@@ -714,7 +738,7 @@ class BayOptTuner:
 
         # 5. Using the mean heap will return the self.max_heap_size number of schedules seen during probing
         min_heap_schedules: List[Schedule] = [scored_sch.sch for scored_sch in self.top_schedule_heap]
-        self.min_heap_log_scores()
+        self.min_heap_log_scores(self.work_dir)
         return min_heap_schedules
 
     def tune_single_schedule(self, untuned_sch: Schedule, measured: bool) -> Schedule:
@@ -782,18 +806,27 @@ class BayOptTuner:
                 if len(self.top_schedule_heap) > self.max_heap_size:
                     heapq.heappop(self.top_schedule_heap)
 
-    def min_heap_log_scores(self):
-        """Logs the scores of the Schedules in the heap"""
+    def min_heap_log_scores(self, work_dir: str):
+        """Logs the scores of the Schedules in the heap
+
+        Parameters
+        ----------
+        work_dir: str
+            The work directory to record scores for statistics to
+        """
         task_logger = get_task_logger(self.context.task_name)
 
+        csv_message = ""
         message = "Scores of returned schedules:\n"
         scores: List[float] = [scored_sch.score for scored_sch in self.top_schedule_heap]
         for i in range(len(self.top_schedule_heap)):
             if i != 0 and i % 16 == 0:
                 message += "\n"
             message += f"{scores[i]:.4f}, "
+            csv_message += f"{scores[i]:.4f},{self.context.task_name}\n"
 
         task_logger(logging.INFO, __name__, current_line_number(), message)
+        log_scores_for_stats(work_dir, csv_message)
 
     def compute_location_phase(self, sch: Schedule) -> Schedule:
         """The compute location phase
@@ -1014,12 +1047,15 @@ class BayOptTuner:
         if self.acquisition_func_kind == "ucb":
             # Upper Confidence Bound
             acq_func = UtilityFunction(kind="ucb", kappa=self.kappa)
+            # logger(logging.DEBUG, __name__, current_line_number(), f"AcqFunc=ucb, kappa={self.kappa}")
         elif self.acquisition_func_kind == "poi":
             # Probability of Improvement
             acq_func = UtilityFunction(kind="poi", kappa=self.xi)
+            # logger(logging.DEBUG, __name__, current_line_number(), f"AcqFunc=poi, kappa={self.xi}")
         elif self.acquisition_func_kind == "ei":
             # Expected Improvement
             acq_func = UtilityFunction(kind="ei", xi=self.xi)
+            # logger(logging.DEBUG, __name__, current_line_number(), f"AcqFunc=ei, kappa={self.xi}")
         else:
             raise ValueError(f"Unknown acquisition function of kind: {self.acquisition_func_kind}")
         return acq_func
@@ -2238,7 +2274,40 @@ class TuningState:
             return output_schedules
 
     def notify_runner_results(self, measure_candidates: List[MeasureCandidate], results: List[RunnerResult]):
-        """This function does not perform any real work currently"""
+        """Logs the scores of Schedules that led to an improvement (useful for statistics)
+
+        Parameters
+        ----------
+        measure_candidates : List[MeasureCandidate]
+            The measure candidates for update.
+        results : List[RunnerResult]
+            The profiling results from the runner.
+        """
+        if len(results) > 0:
+            record = self.database.get_top_k(self.workload, 120)
+
+            file_name = "improvement_stats.csv"
+            file_path = os.path.join(self.work_dir, file_name)
+
+            if not os.path.exists(file_path):
+                with open(file_path, "w") as f:
+                    f.write("Score,Old Best,New Best,Task Name\n")
+
+            if len(record) > 100:
+                best_time = min([float(time) for time in record[0].run_secs]) * 10**6
+
+                task_logger = get_task_logger(self.context.task_name)
+
+                for result, candidate in zip(results, measure_candidates):
+                    if result.run_secs is not None:
+                        time = min([float(time) for time in result.run_secs]) * 10**6
+                        if time < best_time:
+                            score = predict_scores([candidate.sch], self.context, self.cost_model)[0]
+                            task_logger(logging.INFO, __name__, current_line_number(),
+                                        f"New best: Schedule Score={score:.4f}, New Best={time}, Old Best={best_time}")
+                            with open(file_path, "+a") as f:
+                                f.write(f"{score},{best_time},{time},{self.context.task_name}\n")
+
         self.st += len(results)
         self.ed += len(results)
 
