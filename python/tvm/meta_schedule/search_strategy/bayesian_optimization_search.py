@@ -482,7 +482,7 @@ class TuningSummary:
         logger(logging.INFO, __name__, current_line_number(),
                f"[Tuner] Number of Points Probed: {self.num_points_probed}")
 
-    def log_scores(self, task_name: str, work_dir: str):
+    def log_scores(self, task_name: str, work_dir: str, dimensions: int, search_space_size: int):
         """Logs the scores of the returned schedule to the log file of the task
 
         Parameters
@@ -491,6 +491,10 @@ class TuningSummary:
             The name of the task
         work_dir: str
             The work directory to save scores to
+        dimensions: int
+            The dimensions of the problem
+        search_space_size: int
+            The search space size
         """
         csv_message = ""
         task_logger = get_task_logger(task_name=task_name)
@@ -499,7 +503,7 @@ class TuningSummary:
             if i != 0 and i % 16 == 0:
                 message += "\n"
             message += f"{self.scores[i]:.4f}, "
-            csv_message += f"{self.scores[i]:.4f},{task_name}\n"
+            csv_message += f"{self.scores[i]:.4f},{task_name},{dimensions},{search_space_size}\n"
 
         task_logger(logging.INFO, __name__, current_line_number(), message)
         log_scores_for_stats(work_dir, csv_message)
@@ -519,7 +523,7 @@ def log_scores_for_stats(work_dir: str, score_message):
     file_path = os.path.join(work_dir, file_name)
     if not os.path.exists(file_path):
         with open(file_path, "w") as f:
-            f.write("Scores,Task Name\n")
+            f.write("Scores,Task Name,Dimensions,Search Space Size\n")
     with open(file_path, "+a") as f:
         f.write(score_message)
 
@@ -678,6 +682,8 @@ class BayOptTuner:
         self.top_schedule_heap: List[ScoredSchedule] = []
         self.max_heap_size: int = len(self.tune_candidates)
         self.use_min_heap: bool = use_min_heap
+        self.dimensions: int = 0
+        self.search_space_size: int = 0
 
         if self.optimizer_logging:
             self.setup_optimizer_dir()
@@ -710,7 +716,7 @@ class BayOptTuner:
         tuning_summary.log()
         # 6. Log additional information to task log
         self.postproc_stats.log(self.context.task_name, current_line_number(), "Tuning Postproc Summary")
-        tuning_summary.log_scores(self.context.task_name, self.work_dir)
+        tuning_summary.log_scores(self.context.task_name, self.work_dir, self.dimensions, self.search_space_size)
         return tuned_schedules
 
     def tune_min_heap(self):
@@ -738,7 +744,7 @@ class BayOptTuner:
 
         # 5. Using the mean heap will return the self.max_heap_size number of schedules seen during probing
         min_heap_schedules: List[Schedule] = [scored_sch.sch for scored_sch in self.top_schedule_heap]
-        self.min_heap_log_scores(self.work_dir)
+        self.min_heap_log_scores(self.work_dir, self.dimensions, self.search_space_size)
         return min_heap_schedules
 
     def tune_single_schedule(self, untuned_sch: Schedule, measured: bool) -> Schedule:
@@ -806,13 +812,17 @@ class BayOptTuner:
                 if len(self.top_schedule_heap) > self.max_heap_size:
                     heapq.heappop(self.top_schedule_heap)
 
-    def min_heap_log_scores(self, work_dir: str):
+    def min_heap_log_scores(self, work_dir: str, dimensions: int, search_space_size: int):
         """Logs the scores of the Schedules in the heap
 
         Parameters
         ----------
         work_dir: str
             The work directory to record scores for statistics to
+        dimensions: int
+            The dimensions of the problem
+        search_space_size: int
+            The search space size
         """
         task_logger = get_task_logger(self.context.task_name)
 
@@ -823,7 +833,7 @@ class BayOptTuner:
             if i != 0 and i % 16 == 0:
                 message += "\n"
             message += f"{scores[i]:.4f}, "
-            csv_message += f"{scores[i]:.4f},{self.context.task_name}\n"
+            csv_message += f"{scores[i]:.4f},{self.context.task_name},{dimensions},{search_space_size}\n"
 
         task_logger(logging.INFO, __name__, current_line_number(), message)
         log_scores_for_stats(work_dir, csv_message)
@@ -1101,6 +1111,19 @@ class BayOptTuner:
 
         return next_decision
 
+    def get_search_space_size(self, pbounds: dict):
+        """Returns the total number of parameter combinations
+
+        Parameters
+        ----------
+        pbounds: dict
+            The dictionary containing the parameter bounds
+        """
+        size = 1
+        for _, bounds in pbounds.items():
+            size *= bounds[1]
+        return size
+
     def bayesian_phase(self, input_sch: Schedule, measured: bool) -> Schedule:
         """ The Bayesian Optimization phase
 
@@ -1120,6 +1143,8 @@ class BayOptTuner:
         """
         # 1. Extract the parameters from the input schedule
         pbounds = self.get_parameters(untuned_sch=input_sch)
+        self.dimensions = len(pbounds)
+        self.search_space_size = self.get_search_space_size(pbounds)
 
         # 2. Set and check the number of tuneable instructions
         self.tuning_report.num_tuneable_insts = len(pbounds)
