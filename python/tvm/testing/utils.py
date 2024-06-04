@@ -527,7 +527,6 @@ def enabled_targets():
 
 
 class Feature:
-
     """A feature that may be required to run a test.
 
     Parameters
@@ -896,6 +895,9 @@ requires_cudnn = Feature("cudnn", "cuDNN", cmake_flag="USE_CUDNN", parent_featur
 # Mark a test as requiring the cuBLAS library.
 requires_cublas = Feature("cublas", "cuBLAS", cmake_flag="USE_CUBLAS", parent_features="cuda")
 
+# Mark a test as requiring NCCL support
+requires_nccl = Feature("nccl", "NCCL", cmake_flag="USE_NCCL", parent_features="cuda")
+
 # Mark a test as requiring the NVPTX compilation on the CUDA runtime
 requires_nvptx = Feature(
     "nvptx",
@@ -989,6 +991,9 @@ requires_ethosu = Feature("ethosu", "Arm(R) Ethos(TM)-U", cmake_flag="USE_ETHOSU
 # Mark a test as requiring libtorch to run
 requires_libtorch = Feature("libtorch", "LibTorch", cmake_flag="USE_LIBTORCH")
 
+# Mark a test as requiring the MRVL Library
+requires_mrvl = Feature("mrvl", "Marvell", cmake_flag="USE_MRVL")
+
 # Mark a test as requiring Hexagon to run
 requires_hexagon = Feature(
     "hexagon",
@@ -1018,6 +1023,19 @@ requires_corstone300 = Feature(
     parent_features="cmsisnn",
 )
 
+
+def _aprofile_aem_fvp_compile_time_check():
+    if shutil.which("FVP_Base_RevC-2xAEMvA") is None:
+        return "AProfile AEM is not available"
+    return True
+
+
+requires_aprofile_aem_fvp = Feature(
+    "aprofile-aem-fvp",
+    "AProfile AEM FVP",
+    compile_time_check=_aprofile_aem_fvp_compile_time_check,
+)
+
 # Mark a test as requiring Vitis AI to run
 requires_vitis_ai = Feature("vitis_ai", "Vitis AI", cmake_flag="USE_VITIS_AI")
 
@@ -1036,6 +1054,27 @@ requires_arm_dot = Feature(
     "arm_dot",
     "ARM dot product",
     run_time_check=lambda: _has_cpu_feat("dotprod"),
+)
+
+
+requires_arm_fp16 = Feature(
+    "arm_fp16",
+    "Arm(R) Neon(TM) instructions for FP16",
+    run_time_check=lambda: _has_cpu_feat("fullfp16"),
+)
+
+
+requires_aarch64_sve = Feature(
+    "arm_sve",
+    "AArch64 SVE",
+    run_time_check=lambda: _has_cpu_feat("sve"),
+)
+
+
+requires_aarch64_sme = Feature(
+    "arm_sme",
+    "AArch64 SME",
+    run_time_check=lambda: _has_cpu_feat("sme"),
 )
 
 
@@ -1191,6 +1230,10 @@ def skip_if_32bit(reason):
         return _compose(args, [])
 
     return decorator
+
+
+def skip_if_no_reference_system(func):
+    return skip_if_32bit(reason="Reference system unavailable in i386 container")(func)
 
 
 def requires_package(*packages):
@@ -1435,7 +1478,7 @@ def parameter(*values, ids=None, by_dict=None):
 
     # Optional cls parameter in case a parameter is defined inside a
     # class scope.
-    @pytest.fixture(params=values, ids=ids)
+    @pytest.fixture(params=values, ids=ids, scope="session")
     def as_fixture(*_cls, request):
         return request.param
 
@@ -1939,6 +1982,8 @@ class CompareBeforeAfter:
 
     """
 
+    check_well_formed: bool = True
+
     def __init_subclass__(cls):
         assert len([getattr(cls, name) for name in ["before", "Before"] if hasattr(cls, name)]) <= 1
         assert (
@@ -1982,7 +2027,9 @@ class CompareBeforeAfter:
                         func_dict[name] = method.with_attr("global_symbol", name)
                     else:
                         source_code = "@T.prim_func\n" + textwrap.dedent(inspect.getsource(method))
-                        prim_func = tvm.script.from_source(source_code)
+                        prim_func = tvm.script.from_source(
+                            source_code, check_well_formed=self.check_well_formed
+                        )
                         func_dict[name] = prim_func.with_attr("global_symbol", name)
                 return tvm.IRModule(func_dict)
 
@@ -1991,7 +2038,7 @@ class CompareBeforeAfter:
             def inner(self):
                 # pylint: disable=unused-argument
                 source_code = "@T.prim_func\n" + textwrap.dedent(inspect.getsource(func))
-                return tvm.script.from_source(source_code)
+                return tvm.script.from_source(source_code, check_well_formed=self.check_well_formed)
 
         return pytest.fixture(inner)
 

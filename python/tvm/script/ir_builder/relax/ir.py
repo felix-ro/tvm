@@ -20,32 +20,38 @@
 import builtins
 import functools
 import inspect
-from typing import Any, Dict, List, Optional, Tuple, Union, Callable
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import tvm
 from tvm import DataType, relax
 from tvm.ir import PrimExpr, VDevice
-from ..ir import decl_function, lookup_vdevice
-from tvm.relax import Call, Expr, ExternFunc, TupleGetItem, ShapeExpr, Var, VarBinding, const
-from tvm.relax.utils import gen_call_tir_inputs
-
+from tvm.relax import (
+    Call,
+    Expr,
+    ExternFunc,
+    ShapeExpr,
+    TupleGetItem,
+    Var,
+    VarBinding,
+    const,
+)
 
 ############################### Operators ###############################
 from tvm.relax.op import (
     abs,
     acos,
     acosh,
-    asin,
-    asinh,
-    atan,
-    atanh,
     add,
     arange,
     argmax,
     argmin,
     argsort,
+    asin,
+    asinh,
     assert_op,
     astype,
+    atan,
+    atanh,
     bitwise_and,
     bitwise_not,
     bitwise_or,
@@ -53,12 +59,13 @@ from tvm.relax.op import (
     broadcast_to,
     builtin,
     call_builtin_with_ctx,
+    call_dps_packed,
     call_inplace_packed,
     call_pure_packed,
     call_tir,
     call_tir_inplace,
     call_tir_with_grad,
-    call_dps_packed,
+    ccl,
     ceil,
     clip,
     collapse_sum_like,
@@ -68,10 +75,12 @@ from tvm.relax.op import (
     cosh,
     cumprod,
     cumsum,
-    einsum,
-    scatter_elements,
+    dequantize,
     divide,
+    dynamic_strided_slice,
+    einsum,
     equal,
+    erf,
     ewise_fma,
     exp,
     expand_dims,
@@ -108,8 +117,10 @@ from tvm.relax.op import (
     memory,
     min,
     minimum,
+    multinomial_from_uniform,
     multiply,
     negative,
+    nn,
     not_equal,
     null_value,
     ones,
@@ -119,75 +130,70 @@ from tvm.relax.op import (
     print,
     prod,
     quantize,
-    dequantize,
     repeat,
     reshape,
-    tensor_to_shape,
-    shape_to_tensor,
     round,
     rsqrt,
+    scatter_elements,
     shape_of,
-    std,
-    strided_slice,
-    dynamic_strided_slice,
-    sum,
-    take,
-    variance,
+    shape_to_tensor,
     sigmoid,
     sign,
     sin,
     sinh,
     sort,
     split,
+    sqrt,
     square,
     squeeze,
-    sqrt,
+    std,
+    strided_slice,
     subtract,
+    sum,
+    take,
     tan,
     tanh,
-    erf,
+    tensor_to_shape,
     tile,
     topk,
     tril,
     triu,
     unique,
+    variance,
     vm,
     where,
     wrap_param,
     zeros,
     zeros_like,
-    nn,
-    ccl,
 )
-
+from tvm.relax.op.builtin import stop_lift_params
+from tvm.relax.struct_info import StructInfo
+from tvm.relax.utils import args_converter, gen_call_tir_inputs
+from tvm.runtime import Object as tvm_Object
+from tvm.runtime import ObjectGeneric
 from tvm.runtime.ndarray import (
     cpu,
     cuda,
     device,
+    ext_dev,
     gpu,
-    rocm,
-    opencl,
+    hexagon,
     metal,
+    opencl,
+    rocm,
     vpi,
     vulkan,
-    ext_dev,
-    hexagon,
     webgpu,
 )
 
-from tvm.relax.op.builtin import stop_lift_params
-from tvm.relax.struct_info import StructInfo
-from tvm.relax.utils import args_converter
-from tvm.runtime import Object as tvm_Object
-from tvm.runtime import ObjectGeneric
-
+from ..ir import decl_function, lookup_vdevice
 from . import _ffi_api, frame
 
 ##################### Python Native Function Alias ######################
 
 py_print = builtins.print
-py_tuple = tuple
-py_str = str
+py_tuple = tuple  # pylint: disable=used-before-assignment
+py_str = str  # pylint: disable=used-before-assignment
 
 
 ################################ Device ################################
@@ -330,7 +336,7 @@ def output(*vars: Tuple[Var]) -> None:
 def call_packed(
     func: py_str,
     *args: Expr,
-    sinfo_args: Union[StructInfo, List[StructInfo]],
+    sinfo_args: Optional[Union[StructInfo, List[StructInfo]]] = None,
     **kwargs: Any,
 ) -> Call:
     """Create a relax Call, which calls a packed function.
@@ -340,7 +346,7 @@ def call_packed(
         The name of extern function.
     *args : Expr
         The arguments.
-    sinfo_args: Union[StructInfo, List[StructInfo]]
+    sinfo_args: Optional[Union[StructInfo, List[StructInfo]]]
         The list of structure info arguments.
     kwargs: Expr
         The keyword arguments.
@@ -352,18 +358,20 @@ def call_packed(
     """
     op = ExternFunc(func)
     if sinfo_args is None:
-        raise ValueError("R.call_packed is required to have type_args")
+        sinfo_args = []
     if isinstance(sinfo_args, py_tuple):  # type: ignore
         sinfo_args = list(sinfo_args)
     elif not isinstance(sinfo_args, list):
         sinfo_args = [sinfo_args]
-    for i, sinfo_arg in enumerate(sinfo_args):
-        if callable(sinfo_arg):
-            sinfo_arg = sinfo_arg()
-        # Convert possible StructInfoProxy to StructInfo
-        if isinstance(sinfo_arg, ObjectGeneric):
-            sinfo_arg = sinfo_arg.asobject()
-        sinfo_args[i] = sinfo_arg
+
+    sinfo_args = [
+        sinfo()
+        if callable(sinfo)
+        else sinfo.asobject()
+        if isinstance(sinfo, ObjectGeneric)
+        else sinfo
+        for sinfo in sinfo_args
+    ]
 
     is_default = False
     if "attrs_type_key" in kwargs:
@@ -509,18 +517,25 @@ def SeqExpr() -> frame.SeqExprFrame:  # pylint: disable=invalid-name
 ############################# If Then Else #############################
 
 
-def If(condition: Expr) -> frame.IfFrame:  # pylint: disable=invalid-name
+def If(condition: Union[Expr, PrimExpr]) -> frame.IfFrame:  # pylint: disable=invalid-name
     """Create an if frame.
+
     Parameters
     ----------
-    condition : Expr
-        The condition of if statement, executes the true branch if the condition is true,
-        otherwise jump into the false branch.
+    condition : Union[Expr, PrimExpr]
+
+        The condition of if statement, executes the true branch if the
+        condition is true, otherwise jump into the false branch.
+
     Returns
     -------
     res : frame.IfFrame
         The result IfFrame.
+
     """
+    if not isinstance(condition, Expr):
+        condition = relax.PrimValue(condition)
+
     return _ffi_api.If(condition)  # type: ignore[attr-defined] # pylint: disable=no-member
 
 
@@ -732,6 +747,7 @@ __all__ = [
     "metal",
     "min",
     "minimum",
+    "multinomial_from_uniform",
     "multiply",
     "negative",
     "not_equal",

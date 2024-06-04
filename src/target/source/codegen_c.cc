@@ -672,10 +672,15 @@ void CodeGenC::VisitExpr_(const CallNode* op, std::ostream& os) {  // NOLINT(*)
       this->PrintExpr(op->args[0], os);
       os << " == NULL)";
     } else if (op->op.same_as(builtin::reinterpret())) {
+      auto target_dtype = op->dtype;
+      auto source_dtype = op->args[0]->dtype;
+      CHECK_EQ(target_dtype.lanes() * target_dtype.bits(),
+               source_dtype.lanes() * source_dtype.bits())
+          << "reinterpret expects source and target to have the same number of bits";
       int ssa_scope = BeginScope();
-      std::string rhs = SSAGetID(PrintExpr(op->args[0]), op->args[0]->dtype);
+      std::string rhs = SSAGetID(PrintExpr(op->args[0]), source_dtype);
       os << "(*(";
-      this->PrintType(op->dtype, os);
+      this->PrintType(target_dtype, os);
       os << " *)(&(" << rhs << ")))";
       EndScope(ssa_scope);
     } else if (op->op.same_as(builtin::isnan())) {
@@ -759,6 +764,7 @@ void CodeGenC::VisitStmt_(const DeclBufferNode* op) { this->PrintStmt(op->body);
 
 void CodeGenC::VisitExpr_(const BufferLoadNode* op, std::ostream& os) {  // NOLINT(*)
   ICHECK_EQ(op->indices.size(), 1) << "Load from non-flat memory not supported.";
+  ICHECK(!op->predicate.defined()) << "Predicated buffer load is not supported.";
 
   DataType value_dtype = op->dtype;
   PrimExpr index = op->indices[0];
@@ -818,6 +824,7 @@ void CodeGenC::VisitExpr_(const BufferLoadNode* op, std::ostream& os) {  // NOLI
 
 void CodeGenC::VisitStmt_(const BufferStoreNode* op) {
   ICHECK_EQ(op->indices.size(), 1) << "Store to non-flat memory not supported.";
+  ICHECK(!op->predicate.defined()) << "Predicated buffer store is not supported.";
 
   DataType value_dtype = op->value.dtype();
   DataType element_dtype = op->buffer->dtype;
@@ -888,11 +895,12 @@ void CodeGenC::VisitExpr_(const RampNode* op, std::ostream& os) {  // NOLINT(*)
   // NOTE: C have comma expression so cannot use (int2)(v0, v1)
   // instead should use int2(v0, v1)
   PrintType(op->dtype, os);
+  int lanes = op->dtype.lanes();
   os << "(";
-  for (int i = 0; i < op->lanes; i++) {
+  for (int i = 0; i < lanes; i++) {
     os << "(" << PrintExpr(op->base) << ")"
        << "+(" << PrintExpr(op->stride) << "*" << i << ")";
-    if (i != op->lanes - 1) os << ", ";
+    if (i != lanes - 1) os << ", ";
   }
   os << ")";
 }
@@ -926,7 +934,9 @@ void CodeGenC::VisitExpr_(const ShuffleNode* op, std::ostream& os) {  // NOLINT(
   }
   if (op->indices.size() == 1) {
     // This is an extract element
-    os << concat_vec[Downcast<IntImm>(op->indices[0])->value];
+    int64_t idx = Downcast<IntImm>(op->indices[0])->value;
+    ICHECK_LT(idx, concat_vec.size());
+    os << concat_vec[idx];
   } else {
     // Print the shuffle as vector constructor
     // vec(e0, e1, e2, .. en)

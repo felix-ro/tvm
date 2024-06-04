@@ -28,6 +28,7 @@
 #include <tvm/relax/op_attr_types.h>
 #include <tvm/relax/struct_info.h>
 #include <tvm/relax/transform.h>
+#include <tvm/tir/transform.h>
 
 namespace tvm {
 namespace relax {
@@ -67,21 +68,29 @@ class LegalizeMutator : public ExprMutator {
   }
 
   IRModule Transform() {
-    for (const auto& [gv, func] : mod_->functions) {
+    for (const auto& gv : mod_->GetGlobalVars()) {
+      const auto& func = mod_->Lookup(gv);
       if (func->IsInstance<FunctionNode>()) {
         auto updated_func = Downcast<Function>(this->VisitExpr(func));
         builder_->UpdateFunction(gv, Downcast<BaseFunc>(updated_func));
       }
     }
-    // Fill the "kTarget" attribute of PrimFunc
-    for (const auto& [gv, func] : builder_->GetContextIRModule()->functions) {
-      const tir::PrimFuncNode* prim_func;
-      if (tmap_.count(gv) && (prim_func = func.as<tir::PrimFuncNode>())) {
-        auto f = WithAttr(GetRef<tir::PrimFunc>(prim_func), tvm::attr::kTarget, tmap_[gv]);
-        builder_->UpdateFunction(gv, f);
-      }
+
+    IRModule output = builder_->GetContextIRModule();
+    if (generated_tir_with_target_attr_) {
+      // It is possible that every call to a legalized PrimFunc
+      // contains VDevice annotations.  In that case, the PrimFunc
+      // without a target annotation no longer has any callers, and
+      // should be removed.
+      output = relax::transform::DeadCodeElimination()(output);
+
+      // Avoid accidental sharing of TIR variables in the legalized
+      // PrimFuncs, when kernels for multiple devices are generated
+      // from the same PrimFunc.
+      output = tir::transform::ConvertSSA()(output);
     }
-    return builder_->GetContextIRModule();
+
+    return output;
   }
 
  private:
@@ -90,23 +99,32 @@ class LegalizeMutator : public ExprMutator {
   bool WrapPureCondition(const Op& op, const Expr& legalized) {
     static const auto& purity_map = Op::GetAttrMap<Bool>("FPurity");
 
-    // unlikely for this condition not to be met
-    if (const CallNode* call = legalized.as<CallNode>()) {
-      // if the original op is not pure, don't wrap
-      if (!(purity_map.count(op) && purity_map[op]->value)) {
+    const CallNode* call = legalized.as<CallNode>();
+
+    if (!call) {
+      // Unlikely for this condition to be met, but it is possible.
+      // For example, an operation could produce a Tuple output, and
+      // be legalized into separate calls for each item in the Tuple.
+      return false;
+    }
+
+    bool pure_original_op = purity_map.get(op, Bool(false))->value;
+    bool pure_legalized_op = [&]() -> bool {
+      if (auto legalized_op = call->op.as<Op>()) {
+        return purity_map.get(legalized_op.value(), Bool(false))->value;
+      } else if (auto func_sinfo = call->op->struct_info_.as<FuncStructInfoNode>()) {
+        return func_sinfo->purity;
+      } else {
         return false;
       }
-      if (const OpNode* call_op = call->op.as<OpNode>()) {
-        auto res_op = GetRef<Op>(call_op);
-        if (purity_map.count(res_op)) {
-          // if the legalized op is already pure, we *don't* need a wrapper
-          return !purity_map[res_op]->value;
-        }
-      }
-      // simplest case: wrap if the original op was pure and the result is somehow not
-      return true;
-    }
-    return false;
+    }();
+
+    // If the original op was pure, but the legalized op was not,
+    // the legalized op may occur in a context that requires pure
+    // functions, such as a `relax::DataflowBlock`.  In this case,
+    // we should wrap the legalized operation to indicate that it is
+    // still pure.
+    return pure_original_op && !pure_legalized_op;
   }
 
   Call WrapPureCall(const Call& ret) {
@@ -118,7 +136,7 @@ class LegalizeMutator : public ExprMutator {
     return Call(call_pure_packed_op, ret_args, ret->attrs, ret->sinfo_args);
   }
 
-  Target GetTarget(const Array<StructInfo>& sinfos) {
+  Optional<Target> GetTarget(const Array<StructInfo>& sinfos) {
     for (auto sinfo : sinfos) {
       if (const auto* tinfo = sinfo.as<TensorStructInfoNode>()) {
         if (tinfo->vdevice.defined()) {
@@ -131,23 +149,82 @@ class LegalizeMutator : public ExprMutator {
         return GetTarget(tup_sinfo->fields);
       }
     }
-    return Target();
+    return NullOpt;
   }
 
-  void SaveTarget(const Expr& expr) {
-    if (expr->IsInstance<CallNode>()) {
-      auto call = Downcast<Call>(expr);
-      auto target = GetTarget(call->sinfo_args);
-      const GlobalVarNode* gvar_node;
-      if (target.defined() && (gvar_node = call->args[0].as<GlobalVarNode>())) {
-        this->tmap_.Set(GetRef<GlobalVar>(gvar_node), target);
-      }
+  Expr BindTarget(Expr expr) {
+    if (!expr->IsInstance<CallNode>()) {
+      // FLegalize returned something other than a relax::Call.  This
+      // post-processing only handles cases where legalization
+      // produces a lowered call node.  In principle, this
+      // post-processing isn't necessary, and FLegalize should already
+      // have generated vdevice-aware kernels, so hopefully the
+      // FLegalize implementation did so.
+      return expr;
     }
+
+    auto call = Downcast<Call>(expr);
+
+    auto vdevice_target = GetTarget(call->sinfo_args);
+    if (!vdevice_target.defined()) {
+      // No vdevice annotation is present, so we don't need to apply
+      // any updates.
+      return expr;
+    }
+
+    if (call->args.empty()) {
+      return expr;
+    }
+
+    auto gvar = call->args[0].as<GlobalVar>();
+    if (!gvar.defined()) {
+      // This is not a call into a legalized function within the
+      // current IRModule, so no post-processing is required.
+      return expr;
+    }
+
+    auto base_func = builder_->GetContextIRModule()->Lookup(gvar.value());
+    auto opt_prim_func = base_func.as<tir::PrimFunc>();
+    if (!opt_prim_func) {
+      // The call is to something other than a PrimFunc.  It may be
+      // another Relax function, in which case the legalization of its
+      // body will handle any additional target annotations.
+      return expr;
+    }
+    auto prim_func = opt_prim_func.value();
+
+    auto func_target = prim_func->GetAttr<Target>(tvm::attr::kTarget);
+    if (func_target && func_target.value()->kind == vdevice_target.value()->kind) {
+      // The function already has compatible annotations for the
+      // target, so no modifications are required.
+      return expr;
+    }
+
+    // The FLegalize function generated a PrimFunc, but that PrimFunc
+    // doesn't have annotations compatible with the vdevice required
+    // by the Relax StructInfo.  Update the call to instead call a
+    // `PrimFunc` with the appropriate target annotation.  In the
+    // future, this may be treated as a bug in the FLegalize
+    // implementation, rather than expected output from it.
+    auto new_prim_func = WithAttr(prim_func, tvm::attr::kTarget, vdevice_target.value());
+    auto new_gvar_name = [&]() -> std::string {
+      std::stringstream ss;
+      ss << gvar.value()->name_hint;
+      ss << "_";
+      ss << vdevice_target.value()->kind->name;
+      return ss.str();
+    }();
+    auto new_gvar = builder_->AddFunction(new_prim_func, new_gvar_name);
+    generated_tir_with_target_attr_ = true;
+
+    call.CopyOnWrite()->args.Set(0, new_gvar);
+    return call;
   }
 
   Expr VisitExpr_(const CallNode* call) final {
     Call visited_call = Downcast<Call>(this->VisitExprPostOrder_(call));
     static const auto& legalize_map = Op::GetAttrMap<FLegalize>("FLegalize");
+    static const auto& requires_arg_shapes_map = Op::GetAttrMap<Bool>("RequiresArgumentShapes");
     static const Op& call_pure_packed_op = Op::Get("relax.call_pure_packed");
     static const Op& call_tir_op = Op::Get("relax.call_tir");
     static const Op& call_dps_packed_op = Op::Get("relax.call_dps_packed");
@@ -157,17 +234,72 @@ class LegalizeMutator : public ExprMutator {
     if (op_node == nullptr) {
       return visited_call;
     }
-
     auto op = GetRef<Op>(op_node);
-    std::string op_name(op->name);
-    bool is_data_dependent_op = (op_name.find("dynamic") != std::string::npos);
-    // Not all shape values are known
-    // Data-dependent ops are exception since their output shape will be identified at runtime.
-    // Legalizer will insert their shape functions, which are manually registered, and match cast
-    // to define symbolic output shape at compile time.
-    if (!std::all_of(visited_call->args.begin(), visited_call->args.end(),
-                     [](Expr arg) { return KnowAllShapeValues(GetStructInfo(arg)); }) ||
-        (!is_data_dependent_op && !KnowAllShapeValues(GetStructInfo(visited_call)))) {
+
+    bool can_legalize = [&]() -> bool {
+      bool requires_arg_shapes = requires_arg_shapes_map.get(op, Bool(true))->value;
+      if (!requires_arg_shapes) {
+        // This operator does not require its arguments to have a
+        // known shape/dtype.  For example, the "relax.tensor_ndim"
+        // operator can output the dimensionality of a tensor at
+        // runtime, and does not require the dimensionality to be
+        // known at compile-time.
+        return true;
+      }
+
+      bool arg_shapes_defined =
+          std::all_of(visited_call->args.begin(), visited_call->args.end(),
+                      [](Expr arg) { return KnowAllShapeValues(GetStructInfo(arg)); });
+      if (!arg_shapes_defined) {
+        // This operator cannot be legalized, because legalization
+        // requires the argument shapes to be known.
+        //
+        // TODO(Lunderberg):
+        //
+        //     Improve this fallback case, as failure to legalize can
+        //     produce unexpected errors during CodeGenVM.  This could
+        //     be done by having `R.Tensor(ndim=2)` be syntactic sugar
+        //     for `R.Tensor(shape=[m, n])`, where `m` and `n` are new
+        //     shape variables.  This would allow legalization into
+        //     dynamic TIR PrimFuncs.
+        //
+        //     This fallback would only be applicable for cases where
+        //     both the dtype and the dimensionality are known.  While
+        //     Relax can express a tensor with unknown dtype and
+        //     dimensionality as `TensorStructInfo(DataType::Void(),
+        //     kUnknownNDim)`, TIR cannot express unknown dtype or
+        //     unknown dimensionality.
+        return false;
+      }
+
+      std::string op_name(op->name);
+      bool is_data_dependent_op = (op_name.find("dynamic") != std::string::npos);
+      bool ret_shape_defined = KnowAllShapeValues(GetStructInfo(visited_call));
+      if (!is_data_dependent_op && !ret_shape_defined) {
+        // This operator cannot be legalized, because legalization by
+        // default requires the output shape.  The exception is
+        // data-dependent operators (e.g. `R.dynamic_strided_slice`),
+        // where the shape of the output depends on the runtime values
+        // stored in a tensor.
+        //
+        // For data-dependent ops, the output shape will be identified
+        // at runtime.  The Legalizer will insert their shape
+        // functions, which are manually registered for each
+        // data-dependent op, and match cast to define symbolic output
+        // shapes.  These symbolic output shapes at compile time can
+        // be by later operations to refer to the runtime shape.
+        //
+        // TODO(Lunderberg): Make a new operator attribute
+        // `.set_attr<Bool>("DataDependent")`, rather than relying on
+        // the name of the operator.
+        return false;
+      }
+
+      // All checks pass, this operator can be legalized.
+      return true;
+    }();
+
+    if (!can_legalize) {
       return visited_call;
     }
 
@@ -201,8 +333,9 @@ class LegalizeMutator : public ExprMutator {
     }
     Expr legalized = legalization_func(builder_, visited_call);
 
-    // Save the expected target info. into tmap_
-    SaveTarget(legalized);
+    // Append the target attribute to any PrimFunc generated in
+    // legalization.
+    legalized = BindTarget(legalized);
 
     legalized = builder_->Normalize(legalized);
 
@@ -236,8 +369,8 @@ class LegalizeMutator : public ExprMutator {
   IRModule mod_;
   /*! \brief The customized legalization function map. */
   Map<String, PackedFunc> cmap_;
-  /*! \brief The map from GlobalVar of PrimFunc to compilation Target. */
-  Map<GlobalVar, Target> tmap_;
+  /*! \brief If VDevice annotations produced at least one PrimFunc with a Target attr*/
+  bool generated_tir_with_target_attr_{false};
   /*!
    * \brief A boolean value indicating if to print warnings for CallNode whose op's
    * legalization function is not registered.

@@ -909,6 +909,20 @@ TVM_DLL const Op& anylist_setitem_call_packed();
  */
 TVM_DLL const Op& anylist_setitem_call_cpacked();
 
+/*!
+ * \brief Get the target's vscale value. It will be lowered to llvm.vscale intrinsic
+ * (https://llvm.org/docs/LangRef.html#llvm-vscale-intrinsic)
+ */
+TVM_DLL const Op& vscale();
+
+/*!
+ * \brief Calculate a predicate mask given an upper bound (limit) and a current value (base).
+ *
+ * It will be lowered to the llvm.get.active.lane.mask intrinsic.
+ * (https://llvm.org/docs/LangRef.html#llvm-get-active-lane-mask-intrinsics)
+ */
+TVM_DLL const Op& get_active_lane_mask();
+
 /*! \brief The kind of structure field info used in intrinsic */
 enum TVMStructFieldKind : int {
   // array head address

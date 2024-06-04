@@ -15,6 +15,7 @@
 # specific language governing permissions and limitations
 # under the License.
 """Test alter op layout pass"""
+import platform
 import pytest
 
 import tvm
@@ -22,6 +23,7 @@ from tvm import relay, topi
 from tvm.relay import transform, analysis
 from tvm.relay.testing.temp_op_attr import TempOpAttr
 from tvm.relay.testing import run_infer_type
+from tvm.target.codegen import llvm_version_major
 import numpy as np
 import tvm.testing
 from tvm.relay import testing
@@ -1195,7 +1197,7 @@ def test_alter_layout_nhwc_arm():
     def alter_conv2d(attrs, inputs, tinfos, out_type):
         from tvm import topi
 
-        with tvm.target.Target("llvm -device=arm_cpu"):
+        with tvm.target.Target("llvm -mtriple=arm-linux-gnu -device=arm_cpu"):
             return topi.nn.conv2d_alter_layout(attrs, inputs, tinfos, out_type)
 
     # Check NHWC conversion.
@@ -1450,6 +1452,91 @@ def test_alter_op_dense_packed_data():
             assert tvm.ir.structural_equal(a, b)
 
 
+@pytest.mark.skipif(
+    llvm_version_major() < 17, reason="SME is not supported in earlier versions of LLVM"
+)
+def test_alter_op_dense_arm_cpu_sme_float32():
+    np.random.seed(0)
+    y_data = np.random.uniform(size=(64, 32)).astype("float32")
+
+    def before():
+        x = relay.var("x", shape=(32, 32), dtype="float32")
+        y = relay.const(y_data, dtype="float32")
+        dense = relay.nn.dense(x, y)
+        return relay.Function(analysis.free_vars(dense), dense)
+
+    def expected():
+        x = relay.var("x", shape=(32, 32), dtype="float32")
+        y = relay.const(y_data.transpose(), dtype="float32")
+        matmul = relay.nn.matmul(x, y)
+        return relay.Function(analysis.free_vars(matmul), matmul)
+
+    with tvm.target.Target("llvm -mtriple=aarch64-linux-gnu -mattr=+v9.2a,+sme"):
+        with TempOpAttr("nn.dense", "FTVMAlterOpLayout", topi.arm_cpu.dense_alter_op._alter_dense):
+            a = run_opt_pass(before(), transform.AlterOpLayout())
+            b = run_opt_pass(expected(), transform.InferType())
+            assert tvm.ir.structural_equal(a, b)
+
+
+@pytest.mark.skipif(
+    llvm_version_major() < 17, reason="SME is not supported in earlier versions of LLVM"
+)
+def test_alter_op_dense_arm_cpu_sme_float16_float32():
+    from tvm.relay.op.nn import _make  # pylint: disable-top-level-import
+
+    np.random.seed(0)
+    y_data = np.random.uniform(size=(64, 32)).astype("float16")
+
+    def before():
+        x = relay.var("x", shape=(32, 32), dtype="float16")
+        y = relay.const(y_data, dtype="float16")
+        dense = relay.nn.dense(x, y, out_dtype="float32")
+        return relay.Function(analysis.free_vars(dense), dense)
+
+    def expected():
+        x = relay.var("x", shape=(32, 32), dtype="float16")
+        y = relay.const(y_data, dtype="float16")
+        # Cannot make using the public API (relay.nn.matmul) since it will
+        # create an nn.dense op instead
+        matmul = _make.matmul(x, y, None, "float32", False, True)
+        return relay.Function(analysis.free_vars(matmul), matmul)
+
+    with tvm.target.Target("llvm -mtriple=aarch64-linux-gnu -mattr=+v9.2a,+sme"):
+        with TempOpAttr("nn.dense", "FTVMAlterOpLayout", topi.arm_cpu.dense_alter_op._alter_dense):
+            a = run_opt_pass(before(), transform.AlterOpLayout())
+            b = run_opt_pass(expected(), transform.InferType())
+            assert tvm.ir.structural_equal(a, b)
+
+
+@pytest.mark.skipif(
+    llvm_version_major() < 17, reason="SME is not supported in earlier versions of LLVM"
+)
+@pytest.mark.parametrize(
+    "transpose_b,transform_b", [(False, lambda x: x), (True, lambda x: x.transpose())]
+)
+def test_alter_op_matmul_arm_cpu_sme(transpose_b, transform_b):
+    np.random.seed(0)
+    y_data = np.random.uniform(size=(64, 32)).astype("float32")
+
+    def before():
+        x = relay.var("x", shape=(96, 32), dtype="float32")
+        y = relay.const(y_data, dtype="float32")
+        dense = relay.nn.matmul(x, y, transpose_a=False, transpose_b=transpose_b)
+        return relay.Function(analysis.free_vars(dense), dense)
+
+    def expected():
+        x = relay.var("x", shape=(96, 32), dtype="float32")
+        y = relay.const(transform_b(y_data), dtype="float32")
+        matmul = relay.nn.matmul(x, y)
+        return relay.Function(analysis.free_vars(matmul), matmul)
+
+    with tvm.target.Target("llvm -mtriple=aarch64-linux-gnu -mattr=+v9.2a,+sme"):
+        with TempOpAttr("nn.dense", "FTVMAlterOpLayout", topi.arm_cpu.dense_alter_op._alter_dense):
+            a = run_opt_pass(before(), transform.AlterOpLayout())
+            b = run_opt_pass(expected(), transform.InferType())
+            assert tvm.ir.structural_equal(a, b)
+
+
 def test_conv2d_strided_slice_packed_to_unpacked():
     """We do not support propagating through packed to unpacked layout"""
     x_shape = (1, 1, 1, 1, 4)
@@ -1538,6 +1625,10 @@ def test_conv2d_reduce_channels():
         relay.build(mod, params=params, target="llvm")
 
 
+@pytest.mark.skipif(
+    platform.machine() == "aarch64",
+    reason="Layout NCHW4c unsupported in `arm_cpu`. See https://github.com/apache/tvm/issues/16537",
+)
 def test_alter_layout_nonscalar_broadcast():
     """Test boradcast operators"""
 
@@ -1602,6 +1693,10 @@ def test_alter_layout_nonscalar_broadcast():
     np.testing.assert_allclose(res.numpy(), res1.numpy())
 
 
+@pytest.mark.skipif(
+    platform.machine() == "aarch64",
+    reason="Layout NCHW4c unsupported in `arm_cpu`. See https://github.com/apache/tvm/issues/16537",
+)
 def test_alter_layout_blocked_no_broadcast():
     """Test boradcast operators working on already blocked layout"""
 
@@ -1660,6 +1755,10 @@ def test_alter_layout_blocked_no_broadcast():
     np.testing.assert_allclose(res.numpy(), res1.numpy())
 
 
+@pytest.mark.skipif(
+    platform.machine() == "aarch64",
+    reason="Layout NCHW4c unsupported in `arm_cpu`. See https://github.com/apache/tvm/issues/16537",
+)
 def test_alter_layout_blocked_broadcast():
     """Test boradcast operators working on already blocked layout"""
 
@@ -1718,6 +1817,10 @@ def test_alter_layout_blocked_broadcast():
     np.testing.assert_allclose(res.numpy(), res1.numpy())
 
 
+@pytest.mark.skipif(
+    platform.machine() == "aarch64",
+    reason="Layout NCHW4c unsupported in `arm_cpu`. See https://github.com/apache/tvm/issues/16537",
+)
 def test_alter_layout_re_blocking_broadcast():
     """Test of re-blocking shapes with boradcast operators"""
 
@@ -1802,6 +1905,10 @@ def test_alter_layout_re_blocking_broadcast():
     np.testing.assert_allclose(res.numpy(), res1.numpy(), rtol=1e-5, atol=1e-5)
 
 
+@pytest.mark.skipif(
+    platform.machine() == "aarch64",
+    reason="Layout NCHW4c unsupported in `arm_cpu`. See https://github.com/apache/tvm/issues/16537",
+)
 def test_broadcast_non_adaptable():
     """NCHW4c + [x, x, 4] and NCHW4c is being altered to NCHW"""
 
@@ -1870,6 +1977,10 @@ def test_broadcast_non_adaptable():
     np.testing.assert_allclose(res.numpy(), res1.numpy())
 
 
+@pytest.mark.skipif(
+    platform.machine() == "aarch64",
+    reason="Layout NCHW4c unsupported in `arm_cpu`. See https://github.com/apache/tvm/issues/16537",
+)
 def test_broadcast_respect_input_layouts():
     def before():
         x = relay.var("x", shape=(1, 16, 1, 1))

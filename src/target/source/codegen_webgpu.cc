@@ -47,7 +47,7 @@ struct WebGPUWorkGroupInfo {
   // whether we have ref to block index z is used.
   bool has_block_index_z{false};
   // set of handles that have write access
-  std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual> write_access_set;
+  std::unordered_set<Var> write_access_set;
 };
 
 class WebGPUWorkgroupInfoCollector : public StmtExprVisitor {
@@ -344,9 +344,10 @@ void CodeGenWebGPU::PrintSSAAssign(const std::string& target, const std::string&
 
 void CodeGenWebGPU::VisitExpr_(const BroadcastNode* op, std::ostream& os) {  // NOLINT(*)
   std::string v = PrintExpr(op->value);
+  int lanes = op->dtype.lanes();
   PrintType(op->dtype, os);
   os << "(";
-  for (int i = 0; i < op->lanes; ++i) {
+  for (int i = 0; i < lanes; ++i) {
     if (i != 0) os << ", ";
     os << v;
   }
@@ -458,6 +459,7 @@ void CodeGenWebGPU::VisitExpr_(const BufferLoadNode* op, std::ostream& os) {  //
   // to ensure correctness in the case of nested-expression
   // do not try to lift common printings from each case
   ICHECK_EQ(op->indices.size(), 1) << "Load from non-flat memory not supported.";
+  ICHECK(!op->predicate.defined()) << "Predicated buffer load is not supported.";
 
   DataType value_dtype = op->dtype;
   PrimExpr index = op->indices[0];
@@ -530,6 +532,8 @@ void CodeGenWebGPU::VisitStmt_(const LetStmtNode* op) {
 
 void CodeGenWebGPU::VisitStmt_(const BufferStoreNode* op) {
   CHECK_EQ(op->indices.size(), 1) << "Store to non-flat memory not supported.";
+  ICHECK(!op->predicate.defined()) << "Predicated buffer store is not supported.";
+
   DataType value_dtype = op->value.dtype();
   DataType element_dtype = op->buffer->dtype;
   PrimExpr index = op->indices[0];
@@ -599,13 +603,15 @@ void CodeGenWebGPU::VisitStmt_(const AllocateNode* op) {
     PrintType(op->dtype, this->decl_stream);
     this->decl_stream << ", " << constant_size << ">;\n";
   } else if (storage_scope.rank == runtime::StorageRank::kLocal) {
-    this->decl_stream << "var<private> " << vid << " : array<";
-    PrintType(op->dtype, this->decl_stream);
-    this->decl_stream << ", " << constant_size << ">;\n";
-    // this->PrintIndent();
-    // this->stream << "var " << vid << " : array<";
-    // PrintType(op->dtype, this->stream);
-    // this->stream << ", " << constant_size << ">;\n";
+    // TODO(Charlie): These code would cause non-uniformity as it introduces variables in module
+    // scope rather than function scope; but it was included for some unknown reasons; kept for now.
+    // this->decl_stream << "var<private> " << vid << " : array<";
+    // PrintType(op->dtype, this->decl_stream);
+    // this->decl_stream << ", " << constant_size << ">;\n";
+    this->PrintIndent();
+    this->stream << "var " << vid << " : array<";
+    PrintType(op->dtype, this->stream);
+    this->stream << ", " << constant_size << ">;\n";
   } else {
     LOG(FATAL) << "WebGPU: Do not support storage scope: " << storage_scope.to_string();
   }
@@ -634,6 +640,19 @@ void CodeGenWebGPU::VisitStmt_(const AssertStmtNode* op) {
 
 void CodeGenWebGPU::VisitStmt_(const AllocateConstNode* op) {
   LOG(FATAL) << "WebGPU: do not support alloc const";
+}
+
+void CodeGenWebGPU::VisitStmt_(const WhileNode* op) {
+  PrintIndent();
+  stream << "while (true) {\n";
+  int while_scope = BeginScope();
+  std::string cond = PrintExpr(op->condition);
+  PrintIndent();
+  stream << "if (!(" << cond << ")) { break; }\n";
+  PrintStmt(op->body);
+  this->EndScope(while_scope);
+  PrintIndent();
+  stream << "}\n";
 }
 
 //-------------------------------------------------

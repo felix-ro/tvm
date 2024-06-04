@@ -70,6 +70,16 @@ tvm::relax::Var Arg(const String& name, const tvm::relax::StructInfo& struct_inf
   FunctionFrame frame = FindFunctionFrame("R.Arg");
   tvm::relax::Var var(name, struct_info);
   frame->params.push_back(var);
+
+  // This constraint would normally be provided as part of
+  // `BlockBuilder::BeginScope`.  However, because the frame and its
+  // scope are initialized before the arguments are known, the scope
+  // doesn't have access to these constraints.
+  auto* analyzer = frame->block_builder->GetAnalyzer();
+  for (const auto& tir_var : DefinableTIRVarsInStructInfo(struct_info)) {
+    analyzer->MarkGlobalNonNegValue(tir_var);
+  }
+
   return var;
 }
 
@@ -84,14 +94,21 @@ void FuncName(const String& name) {
 
 void FuncAttrs(Map<String, ObjectRef> attrs) {
   FunctionFrame frame = FindFunctionFrame("R.func_attr");
-  if (!frame->attrs.empty()) {
-    LOG(FATAL) << "ValueError: Duplicate function attrs, previous one is:\n" << frame->attrs;
+  for (const auto& [key, value] : attrs) {
+    if (key == tvm::attr::kGlobalSymbol && frame->is_private.value_or(Bool(false))->value) {
+      LOG(FATAL) << "ValueError: "
+                 << "A private function may not have the kGlobalSymbol (\""
+                 << tvm::attr::kGlobalSymbol << "\") attribute.  "
+                 << "However, a private function specified the global symbol as " << value;
+    }
+    if (auto prev = frame->attrs.Get(key)) {
+      LOG(FATAL) << "ValueError: "
+                 << "Duplicate R.func_attr annotation for key = \"" << key << "\".  "
+                 << "Previous value was " << prev.value() << ", with later definition as " << value;
+    } else {
+      frame->attrs.Set(key, value);
+    }
   }
-  if (attrs.count(tvm::attr::kGlobalSymbol) && frame->is_private.value_or(Bool(false))->value) {
-    LOG(FATAL) << "ValueError: Specifying a global symbol attribute even though the function is "
-                  "annotated as private";
-  }
-  frame->attrs = attrs;
 }
 
 void FuncRetStructInfo(const tvm::relax::StructInfo& ret_sinfo) {
