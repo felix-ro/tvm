@@ -16,30 +16,29 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-#ifndef TVM_RUNTIME_RELAX_VM_KV_CACHE_H_
-#define TVM_RUNTIME_RELAX_VM_KV_CACHE_H_
+#ifndef TVM_RUNTIME_RELAX_VM_KV_STATE_H_
+#define TVM_RUNTIME_RELAX_VM_KV_STATE_H_
 #include <tvm/runtime/device_api.h>
 #include <tvm/runtime/logging.h>
 #include <tvm/runtime/ndarray.h>
 #include <tvm/runtime/registry.h>
 
+#include "tvm/runtime/object.h"
+
 namespace tvm {
 namespace runtime {
 namespace relax_vm {
 
-/*!
- * \brief The base class of attention KV cache for efficient
- * k/v data management and attention computation.
- */
-class AttentionKVCache : public Object {
+/*! \brief The base class of attention KV cache and rnn state. */
+class KVStateObj : public Object {
  public:
-  /*! \brief Reset the KV cache. */
+  /*! \brief Reset the KV State. */
   virtual void Clear() = 0;
 
   /************** Sequence Management **************/
 
   /*!
-   * \brief Add a new sequence with empty K/V data in the cache.
+   * \brief Add a new sequence with empty K/V state in the cache.
    * Check if the validity of the input sequence id.
    * \param seq_id The id of the new sequence to be added.
    * \throws Error if the given sequence id is not valid.
@@ -47,22 +46,25 @@ class AttentionKVCache : public Object {
   virtual void AddSequence(int64_t seq_id) = 0;
 
   /*!
-   * \brief Remove a sequence and its K/V data from the KV cache.
+   * \brief Remove a sequence and its K/V state from the KV cache.
    * \param seq_id The sequence to remove from cache.
    * \throws Error if the given sequence id is not valid.
    */
   virtual void RemoveSequence(int64_t seq_id) = 0;
 
   /*!
-   * \brief Fork the K/V data of parent sequence to the child sequence.
-   * After the fork, the child sequence has K/V data of the parent
+   * \brief Fork the K/V state of parent sequence to the child sequence.
+   * After the fork, the child sequence has K/V state of the parent
    * sequence.
    * \param parent_seq_id The parent (source) of the fork.
    * \param child_seq_id The child (destination) of the fork.
    * The child sequence id should not exist in cache prior to fork.
+   * \param fork_pos The parent position to fork, the legal forking position is within
+   * [0, parent_seq_length] and -1 as default for last position. And if forking position is 0,
+   * it equals to add a new sequence with child sequence id.
    * \throws Error if the given sequence ids are not valid.
    */
-  virtual void ForkSequence(int64_t parent_seq_id, int64_t child_seq_id) = 0;
+  virtual void ForkSequence(int64_t parent_seq_id, int64_t child_seq_id, int64_t fork_pos = -1) = 0;
 
   /*!
    * \brief Pop out the trailing `n` tokens from the KV cache for the
@@ -73,18 +75,6 @@ class AttentionKVCache : public Object {
    */
   virtual void PopN(int64_t seq_id, int32_t n) = 0;
 
-  /************** Raw Info Query **************/
-
-  /*!
-   * \brief Get the number of available pages in the KV cache.
-   * When the underlying KV cache implementation is not
-   * paged KV cache, the function falls back to return the
-   * number of remaining size (in terms of number of tokens).
-   */
-  virtual int32_t GetNumAvailablePages() const = 0;
-
-  /************** Attention **************/
-
   /*!
    * \brief Mark the start of the forward function with the ids of
    * the sequences and the sequence length to forward for each
@@ -93,14 +83,18 @@ class AttentionKVCache : public Object {
    * with prefill length "10", "15", "20", then we pass `[5, 1, 8]`
    * as the seq_ids and `[10, 15, 20]` as the append_lengths.
    * This method is invoked right before entering the model forward
-   * function, and contains operations to prepare the the incoming
+   * function, and contains operations to prepare the incoming
    * forward. For instance, this method may send auxiliary KV cache
    * data structures to GPUs so that they can be operated
    * in the model forward function.
    * \param seq_ids The ids of the sequence to run in the incoming model forward.
    * \param append_lengths The sequence lengths to run forward for for each sequence.
+   * \param token_tree_parent_ptr The parent idx array of the token trees. Its length
+   * is the sum of "append_lengths". Nullptr means the token tree of each sequence
+   * is a chain.
    */
-  virtual void BeginForward(const IntTuple& seq_ids, const IntTuple& append_lengths) = 0;
+  virtual void BeginForward(const IntTuple& seq_ids, const IntTuple& append_lengths,
+                            const Optional<IntTuple>& token_tree_parent_ptr = NullOpt) = 0;
 
   /*!
    * \brief Mark the start of the forward function.
@@ -109,33 +103,61 @@ class AttentionKVCache : public Object {
    */
   virtual void EndForward() = 0;
 
+  static constexpr const uint32_t _type_index = TypeIndex::kDynamic;
+  static constexpr const char* _type_key = "relax.vm.KVState";
+  TVM_DECLARE_BASE_OBJECT_INFO(KVStateObj, Object)
+};
+
+class KVState : public ObjectRef {
+ public:
+  TVM_DEFINE_MUTABLE_OBJECT_REF_METHODS(KVState, ObjectRef, KVStateObj);
+};
+
+/*!
+ * \brief The base class of attention KV cache for efficient
+ * k/v data management and attention computation.
+ */
+class AttentionKVCacheObj : public KVStateObj {
+ public:
+  /************** Raw Info Query **************/
+
+  /*! \brief Check if the KV cache is empty. */
+  virtual bool Empty() const = 0;
   /*!
-   * \brief Compute attention with the given Q/K/V data at the specified
-   * layer with regard to the previously reserved append lengths.
-   * Q/K/V data are in layout `(total_length, num_heads, head_dim)`,
-   * where `total_length` is the sum of reserved append lengths.
-   * The returned attention result has the same layout as well.
-   * For example, say the KV cache contains 5 sequences. Before
-   * the current model forward, BeginForward is invoked for seq_ids
-   * `[3, 2]` and append_lengths [10, 20]. Then the leading dim of Q/K/V
-   * is 30, where [0, 10) corresponds to seq 3, and [10, 30)
-   * corresponds to seq 2.
-   * This method typically performs the following operations:
-   * - apply positional embeddings to Q/K data,
-   * - append K/V data to cache,
-   * - compute attention with the given Q and all history K/V
-   * for the corresponding sequences.
-   * The function writes attention output to `o_data`, conforming to
-   * the destination-passing style.
-   * \param layer_id The model layer where the attention compute happens.
-   * \param q_data The input Q data, in layout `(total_length, num_qo_heads, head_dim)`.
-   * \param k_data The input K data, in layout `(total_length, num_kv_heads, head_dim)`.
-   * \param v_data The input V data, in layout `(total_length, num_kv_heads, head_dim)`.
-   * \param mask The input mask data, in layout `(total_sqr_length)`.
-   * \param o_data The output O data, in layout `(total_length, num_qo_heads, head_dim)`.
+   * \brief Get the number of available pages in the KV cache.
+   * When the underlying KV cache implementation is not
+   * paged KV cache, the function falls back to return the
+   * number of remaining size (in terms of number of tokens).
    */
-  virtual void Attention(int64_t layer_id, NDArray q_data, NDArray k_data, NDArray v_data,
-                         Optional<NDArray> mask, NDArray o_data) = 0;
+  virtual int32_t GetNumAvailablePages() const = 0;
+
+  /*! \brief Get the current total sequence length in the KV cache. */
+  virtual int32_t GetTotalSequenceLength() const = 0;
+
+  /************** Sequence Management **************/
+
+  /*!
+   * \brief Enable sliding window attention for the given sequence.
+   * Error will be thrown when the KV cache does not support sliding window.
+   * \param seq_id The id of the sequence to enable sliding window for.
+   * \param sliding_window_size The sliding window size for the sequence.
+   * \param attn_sink_size The attention sink set for the sequence.
+   */
+  virtual void EnableSlidingWindowForSeq(int64_t seq_id, int32_t sliding_window_size,
+                                         int32_t attn_sink_size) = 0;
+
+  /*!
+   * \brief Committed the accepted token tree nodes to KV cache.
+   * The commit will update the KV cache, by compacting the KV data and discard
+   * the KV data of rejected tokens.
+   * This is a mandatory step when the BeginForward is given with a token tree.
+   * \param seq_ids The ids of the sequences to commit.
+   * \param leaf_indices The leaf token tree node index of each sequence.
+   */
+  virtual void CommitAcceptedTokenTreeNodes(const IntTuple& seq_ids,
+                                            const IntTuple& leaf_indices) = 0;
+
+  /************** Attention **************/
 
   /*!
    * \brief Compute attention with Q/K/V data which are concatenated along
@@ -148,7 +170,7 @@ class AttentionKVCache : public Object {
    * \sa AttentionKVCache::Attention
    */
   virtual void AttentionWithFusedQKV(int64_t layer_id, NDArray qkv_data, Optional<NDArray> mask,
-                                     NDArray o_data) = 0;
+                                     NDArray o_data, double attn_score_scaling_factor) = 0;
 
   /************** Positions **************/
 
@@ -157,7 +179,7 @@ class AttentionKVCache : public Object {
    * This function is supposed to be invoked after calling BeginForward.
    * \return The in-sequence query positions, in shape `(total_length,)`.
    */
-  virtual NDArray GetQueryPositions() const = 0;
+  virtual NDArray GetQueryPositions() = 0;
 
   /************** Debug Helpers **************/
 
@@ -196,10 +218,63 @@ class AttentionKVCache : public Object {
    * \param v_data The V data to set in layout elaborated above.
    */
   virtual void DebugSetKV(int64_t seq_id, int64_t start_pos, NDArray k_data, NDArray v_data) = 0;
+
+  static constexpr const uint32_t _type_index = TypeIndex::kDynamic;
+  static constexpr const char* _type_key = "relax.vm.AttentionKVCache";
+  TVM_DECLARE_BASE_OBJECT_INFO(AttentionKVCacheObj, KVStateObj);
+};
+
+class AttentionKVCache : public KVState {
+ public:
+  TVM_DEFINE_MUTABLE_OBJECT_REF_METHODS(AttentionKVCache, KVState, AttentionKVCacheObj);
+};
+
+/*!
+ * \brief The base class of RNN State for efficient
+ * State data management and attention computation.
+ */
+class RNNStateObj : public KVStateObj {
+ public:
+  /************** Interaction **************/
+  /*!
+   * \brief Get the State data for the specified sequence.
+   * \param layer_id The model layer where the state is set.
+   * \param state_id The state id within the layer.
+   * \param o_data The output data to be fetched.
+   * \return The array of State data, each element corresponds to a state.
+   * \throws Error if the given sequence id is not valid.
+   */
+  virtual void Get(int64_t layer_id, int64_t state_id, NDArray o_data) = 0;
+
+  /*!
+   * \brief Set the State data for the specified sequence.
+   * \param layer_id The model layer where the state is set.
+   * \param state_id The state id within the layer.
+   * \param data The data to be set.
+   * \throws Error if the given sequence id is not valid.
+   */
+  virtual void Set(int64_t layer_id, int64_t state_id, NDArray data) = 0;
+
+  /*!
+   * \brief Fetch the compact rnn state data of the given sequence.
+   * \param layer_id The model layer where the state is set.
+   * \param state_id The state id within the layer.
+   * \param seq_id The sequence whose state data is to be fetched.
+   */
+  virtual NDArray DebugGet(int64_t layer_id, int64_t state_id, int64_t seq_id) = 0;
+
+  static constexpr const uint32_t _type_index = TypeIndex::kDynamic;
+  static constexpr const char* _type_key = "relax.vm.RNNState";
+  TVM_DECLARE_BASE_OBJECT_INFO(RNNStateObj, KVStateObj);
+};
+
+class RNNState : public KVState {
+ public:
+  TVM_DEFINE_MUTABLE_OBJECT_REF_METHODS(RNNState, KVState, RNNStateObj);
 };
 
 }  // namespace relax_vm
 }  // namespace runtime
 }  // namespace tvm
 
-#endif  // TVM_RUNTIME_RELAX_VM_KV_CACHE_H_
+#endif  // TVM_RUNTIME_RELAX_VM_KV_STATE_H_

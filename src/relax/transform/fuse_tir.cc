@@ -438,9 +438,7 @@ class FusedTIRConstructor : public ExprVisitor {
     ExprVisitor::VisitExpr_(func);
 
     // Step 3. Create and remap buffers for function output
-    ICHECK(func->body->IsInstance<SeqExprNode>())
-        << "Function body is expected to be a SeqExpr, but got: " << func->body->GetTypeKey();
-    Expr body = Downcast<SeqExpr>(func->body)->body;
+    Expr body = func->body->body;
     auto it = func_info_.expr2buffers.find(body);
     ICHECK(it != func_info_.expr2buffers.end())
         << "Fail to detect output buffers for function body";
@@ -449,7 +447,7 @@ class FusedTIRConstructor : public ExprVisitor {
 
     // map of input buffers to indices (helpful for detecting in-place inputs)
     std::unordered_map<tir::Buffer, size_t, ObjectPtrHash, ObjectPtrEqual> buffer_to_idx;
-    std::unordered_map<tir::Var, size_t, ObjectPtrHash, ObjectPtrEqual> input_to_idx;
+    std::unordered_map<tir::Var, size_t> input_to_idx;
     for (size_t i = 0; i < func_info_.params.size(); i++) {
       input_to_idx[func_info_.params[i]] = i;
     }
@@ -964,7 +962,8 @@ class TIRFuseMutator : public ExprMutator {
   static IRModule Transform(IRModule mod) {
     // Collect all primitive relax functions
     Map<GlobalVar, Function> primitive_relax;
-    for (const auto& [gvar, base_func] : mod->functions) {
+    for (const auto& gvar : mod->GetGlobalVars()) {
+      const auto& base_func = mod->Lookup(gvar);
       // Only fuse primitive relax functions
       if (base_func->HasNonzeroAttr(attr::kPrimitive)) {
         if (auto func = base_func.as<relax::Function>()) {
@@ -980,7 +979,7 @@ class TIRFuseMutator : public ExprMutator {
     mod.CopyOnWrite();
 
     IRModule updates;
-    std::unordered_map<GlobalVar, Replacement, ObjectPtrHash, ObjectPtrEqual> replacements;
+    std::unordered_map<GlobalVar, Replacement> replacements;
 
     // Since TIRFuseMutator will delete bunch of PrimFunc, we create an empty block builder.
 
@@ -1025,8 +1024,7 @@ class TIRFuseMutator : public ExprMutator {
     Array<Integer> inplace_indices;
   };
 
-  explicit TIRFuseMutator(
-      std::unordered_map<GlobalVar, Replacement, ObjectPtrHash, ObjectPtrEqual> replacements)
+  explicit TIRFuseMutator(std::unordered_map<GlobalVar, Replacement> replacements)
       : replacements_(replacements) {}
 
   using ExprMutator::VisitExpr_;
@@ -1130,7 +1128,7 @@ class TIRFuseMutator : public ExprMutator {
    *
    * Has one entry for each primitive relax function in the IRModule.
    */
-  std::unordered_map<GlobalVar, Replacement, ObjectPtrHash, ObjectPtrEqual> replacements_;
+  std::unordered_map<GlobalVar, Replacement> replacements_;
 };
 
 IRModule FuseTIR(IRModule mod) {

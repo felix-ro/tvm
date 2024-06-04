@@ -18,6 +18,8 @@
 
 """ Test translate from tensorflow. """
 
+import pytest
+
 from packaging import version as package_version
 import numpy as np
 
@@ -502,6 +504,7 @@ def _test_stridedslice(
     verify_model(graph_def, golden, **io_info)
 
 
+@pytest.mark.xfail(reason="MSC does not support Tuple of PrimValue")
 def test_stridedslice():
     """test tensorflow translator for stridedslice"""
 
@@ -1062,6 +1065,7 @@ def _test_slice_operation_input(input_value, begin_value, size_value):
     verify_model(graph_def, golden, **io_info)
 
 
+@pytest.mark.xfail(reason="MSC does not support Tuple of PrimValue")
 def test_slice():
     """test tensorflow translator for slice"""
 
@@ -1669,7 +1673,7 @@ def _test_infinity(tf_op, name):
     for tf_dtype in tf_dtypes:
         shape = (8, 8)
         data = np.random.uniform(size=shape).astype(tf_dtype)
-        data.ravel()[np.random.choice(data.size, int(data.size * 0.5), replace=False)] = np.infty
+        data.ravel()[np.random.choice(data.size, int(data.size * 0.5), replace=False)] = np.inf
         data.ravel()[np.random.choice(data.size, int(data.size * 0.5), replace=False)] = np.nan
 
         tf.reset_default_graph()

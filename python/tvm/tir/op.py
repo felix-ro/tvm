@@ -16,7 +16,7 @@
 # under the License.
 # pylint: disable=redefined-builtin, invalid-name
 """Operators used in TIR expression."""
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 import tvm._ffi
 from tvm.ir import Array, Op, PrimExpr
@@ -1789,7 +1789,7 @@ def infinity(dtype: str, span: Optional[Span] = None) -> Any:
     return _ffi_api.infinity(dtype, span)  # type: ignore
 
 
-def reinterpret(dtype, value) -> Any:
+def reinterpret(dtype, value, span: Optional[Span] = None) -> Any:
     """infinity value of dtype
 
     Parameters
@@ -1808,7 +1808,7 @@ def reinterpret(dtype, value) -> Any:
     value : tvm.Expr
         The reinterpret cast value of dtype.
     """
-    return call_intrin(dtype, "tir.reinterpret", value)
+    return _ffi_api.reinterpret(dtype, value, span)  # type: ignore
 
 
 def exp(x):
@@ -3347,6 +3347,43 @@ def vscale():
         Call to the vscale intrinsic
     """
     return call_intrin("int32", "tir.vscale")
+
+
+def get_active_lane_mask(dtype, base, limit):
+    """
+    Calculate a predicate mask given an upper bound (limit) and a current value (base).
+
+    It will be lowered to the llvm.get.active.lane.mask intrinsic.
+    (https://llvm.org/docs/LangRef.html#llvm-get-active-lane-mask-intrinsics)
+
+    Parameters
+    ----------
+    dtype : str
+        The data type of the result.
+
+    base : PrimExpr
+        An expression reprsenting the base.
+
+    limit : PrimExpr
+        An expression representing the limit.
+    """
+    return call_intrin(dtype, "tir.get_active_lane_mask", base, limit)
+
+
+def get_vscale_expr(dtype: Union[str, tvm.DataType], min_size: int = 128) -> PrimExpr:
+    """
+    Create a datatype dependent scalable expression.
+
+    Parameters
+    ----------
+    dtype : Union[str, tvm.DataType]
+        Element data type.
+    min_size : int
+        The minimum size of the scalable vector in bits.
+    """
+    if isinstance(dtype, str):
+        dtype = tvm.DataType(dtype)
+    return min_size // dtype.bits * vscale()
 
 
 # pylint: disable=unnecessary-lambda

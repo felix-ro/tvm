@@ -91,18 +91,21 @@ class CanonicalizePlanner : public ExprVisitor {
         bound_to = opt.value();
       }
 
-      if (bound_var.as<DataflowVarNode>() || !bound_to.as<DataflowVarNode>()) {
+      if (bound_var.as<DataflowVarNode>() || !bound_to.as<DataflowVarNode>() ||
+          !visitor.used_outside_home_dataflow_.count(bound_var)) {
         // Case 1: Var = Var
         // Case 2: DataflowVar = Var
         // Case 3: DataflowVar = DataflowVar
+        // Case 4a: Var = DataflowVar, where the Var is not used
+        //          outside the DataflowBlock containing the binding
         //
-        // For these three cases, the trivial binding can be
-        // unwrapped, using the bound variable directly at the point
-        // of use.
+        // For these four cases, the trivial binding can be unwrapped,
+        // using the bound variable directly at the point of use.
         plan.replace_usage.Set(bound_var->vid, bound_to);
         plan.bindings_to_remove.insert(bound_var->vid);
       } else {
-        // Case 4: Var = DataflowVar
+        // Case 4b: Var = DataflowVar, where the Var is used somewhere
+        //          outside the DataflowBlock containing the binding
         //
         // Replacing a Var with a DataflowVar could result in illegal
         // use of a DataflowVar outside of a DataflowBlock.  Instead,
@@ -223,10 +226,10 @@ class CanonicalizePlanner : public ExprVisitor {
   Map<Var, Var> trivial_bindings_;
   Map<Var, Expr> known_bindings_;
   Map<Var, Constant> known_bound_to_constant_;
-  std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual> defined_inside_dataflow_;
+  std::unordered_set<Var> defined_inside_dataflow_;
   // Set of vars either used outside a dataflow block altogether or outside their
   // home dataflow block (the one where they were defined)
-  std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual> used_outside_home_dataflow_;
+  std::unordered_set<Var> used_outside_home_dataflow_;
 };
 
 /*! \brief The mutator class to apply a CanonicalizationPlan */

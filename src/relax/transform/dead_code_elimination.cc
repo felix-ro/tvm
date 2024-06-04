@@ -50,12 +50,22 @@ class CallTracer : public ExprVisitor {
   explicit CallTracer(IRModule mod) : mod_{mod}, called_funcs_{}, visiting_{} {}
 
   void VisitExpr_(const GlobalVarNode* op) final {
-    called_funcs_.insert(GetRef<GlobalVar>(op));
-    auto func = mod_->Lookup(op->name_hint);
-    if (const auto* function_node = func.as<FunctionNode>()) {
-      VisitExpr(GetRef<Function>(function_node));
+    auto gvar = GetRef<GlobalVar>(op);
+    called_funcs_.insert(gvar);
+    if (auto func = mod_->functions.Get(gvar)) {
+      if (const auto* function_node = func.as<FunctionNode>()) {
+        VisitExpr(GetRef<Function>(function_node));
+      }
+      // else: Don't visit PrimFuncs -- we don't need to collect any tir.Calls therein.
+    } else {
+      // The GlobalVar is not contained in the IRModule.  While the
+      // input IRModule is ill-formed, this specific case is allowed
+      // for use with `relax.transform.ApplyPassToFunction`.  If this
+      // occurs, DCE should not remove any internal functions from the
+      // IRModule, as their removal is only valid if we have a
+      // complete call graph.
+      all_callees_found_ = false;
     }
-    // else: Don't visit PrimFuncs -- we don't need to collect any tir.Calls therein.
   }
 
   void VisitExpr_(const CallNode* call_node) final { ExprVisitor::VisitExpr_(call_node); }
@@ -77,20 +87,32 @@ class CallTracer : public ExprVisitor {
     VisitExpr(main_func);
   }
 
-  bool check_if_called(GlobalVar gv) { return called_funcs_.count(gv) > 0; }
+  /* \brief Check if a function is unreachable
+   *
+   * \param gvar The function to be checked
+   *
+   * \return True if the function can be proven to be unreachable,
+   * either directly or indirectly, from an external caller.
+   * Otherwise, false.
+   */
+  bool CheckIfProvablyUnreachable(const GlobalVar& gvar) const {
+    return all_callees_found_ && !called_funcs_.count(gvar);
+  }
 
  private:
   IRModule mod_;
 
+  /* \brief Whether all callees could be located within the IRModule */
+  bool all_callees_found_{true};
+
   // Record the names of all encountered functions.
-  std::unordered_set<GlobalVar, ObjectPtrHash, ObjectPtrEqual> called_funcs_;
+  std::unordered_set<GlobalVar> called_funcs_;
 
   // Record the expressions that are being visited.
   std::unordered_set<Expr, ObjectPtrHash, ObjectPtrEqual> visiting_;
 };
 
-IRModule RemoveUnusedFunctions(
-    IRModule mod, const std::unordered_set<GlobalVar, ObjectPtrHash, ObjectPtrEqual>& entry_funcs) {
+IRModule RemoveUnusedFunctions(IRModule mod, const std::unordered_set<GlobalVar>& entry_funcs) {
   CallTracer tracer(mod);
   for (const auto& gvar : entry_funcs) {
     tracer.VisitExpr(gvar);
@@ -101,7 +123,7 @@ IRModule RemoveUnusedFunctions(
     // The tracer contains all user-provided entry functions, all
     // externally-callable functions, and anything that is directly or
     // indirectly accessible from an entry function.
-    if (!tracer.check_if_called(kv.first)) {
+    if (tracer.CheckIfProvablyUnreachable(kv.first)) {
       to_remove.push_back(kv.first);
     }
   }
@@ -121,11 +143,12 @@ IRModule DeadCodeElimination(const IRModule& arg_mod, Array<runtime::String> ent
 
   // S0: Make a list of all user-specified entry functions and
   // externally-visible entry functions.
-  std::unordered_set<GlobalVar, ObjectPtrHash, ObjectPtrEqual> entry_functions;
+  std::unordered_set<GlobalVar> entry_functions;
   for (const auto& name : entry_function_names) {
     entry_functions.insert(mod->GetGlobalVar(name));
   }
-  for (const auto& [gv, func] : mod->functions) {
+  for (const auto& gv : mod->GetGlobalVars()) {
+    const auto& func = mod->Lookup(gv);
     if (func.as<ExternFuncNode>() || func->GetLinkageType() == LinkageType::kExternal) {
       entry_functions.insert(gv);
     }
