@@ -29,8 +29,6 @@ from .. import Buffer, Stmt
 from ..function import PrimFunc
 from . import _ffi_api
 
-import numpy as np
-
 
 def expr_deep_equal(lhs: PrimExpr, rhs: PrimExpr) -> bool:
     """Deeply compare two nested expressions.
@@ -66,7 +64,7 @@ def expr_deep_equal(lhs: PrimExpr, rhs: PrimExpr) -> bool:
     --------
     tvm.ir.structural_equal
     """
-    return _ffi_api.expr_deep_equal(lhs, rhs)  # type: ignore
+    return _ffi_api.expr_deep_equal(lhs, rhs)  # type: ignore # pylint: disable=no-member
 
 
 def verify_ssa(func: PrimFunc) -> bool:
@@ -82,7 +80,7 @@ def verify_ssa(func: PrimFunc) -> bool:
     result : bool
         The result of verification.
     """
-    return _ffi_api.verify_ssa(func)  # type: ignore
+    return _ffi_api.verify_ssa(func)  # type: ignore # pylint: disable=no-member
 
 
 def verify_memory(func: PrimFunc) -> bool:
@@ -98,7 +96,7 @@ def verify_memory(func: PrimFunc) -> bool:
     result : bool
         The result of verification.
     """
-    return _ffi_api.verify_memory(func)  # type: ignore
+    return _ffi_api.verify_memory(func)  # type: ignore # pylint: disable=no-member
 
 
 def verify_gpu_code(func: PrimFunc, constraints: Dict[str, int]) -> None:
@@ -117,7 +115,7 @@ def verify_gpu_code(func: PrimFunc, constraints: Dict[str, int]) -> None:
     result : bool
         The result of verification.
     """
-    return _ffi_api.verify_gpu_code(func, constraints)  # type: ignore
+    return _ffi_api.verify_gpu_code(func, constraints)  # type: ignore # pylint: disable=no-member
 
 
 def get_block_access_region(
@@ -142,7 +140,7 @@ def get_block_access_region(
             - second: write regions
             - third: opaque regions
     """
-    return _ffi_api.GetBlockAccessRegion(block, buffer_var_map)  # type: ignore
+    return _ffi_api.GetBlockAccessRegion(block, buffer_var_map)  # type: ignore # pylint: disable=no-member
 
 
 def get_block_read_write_region(
@@ -164,7 +162,7 @@ def get_block_read_write_region(
     result : List[List[BufferRegion]]
         An array only consisting of the read regions and write regions of the input block
     """
-    return _ffi_api.GetBlockReadWriteRegion(block, buffer_var_map)  # type: ignore
+    return _ffi_api.GetBlockReadWriteRegion(block, buffer_var_map)  # type: ignore # pylint: disable=no-member
 
 
 def calculate_workspace_bytes(func: PrimFunc, workspace_byte_alignment: int) -> int:
@@ -183,7 +181,7 @@ def calculate_workspace_bytes(func: PrimFunc, workspace_byte_alignment: int) -> 
     result : int
         Workspace size in bytes.
     """
-    return _ffi_api.calculate_workspace_bytes(func, workspace_byte_alignment)  # type: ignore
+    return _ffi_api.calculate_workspace_bytes(func, workspace_byte_alignment)  # type: ignore # pylint: disable=no-member
 
 
 def calculate_constant_bytes(func: PrimFunc, constant_byte_alignment: int) -> int:
@@ -202,7 +200,7 @@ def calculate_constant_bytes(func: PrimFunc, constant_byte_alignment: int) -> in
     result : int
         Workspace size in bytes.
     """
-    return _ffi_api.calculate_constant_bytes(func, constant_byte_alignment)  # type: ignore
+    return _ffi_api.calculate_constant_bytes(func, constant_byte_alignment)  # type: ignore # pylint: disable=no-member
 
 
 def calculate_allocated_bytes(
@@ -227,7 +225,7 @@ def calculate_allocated_bytes(
         raise TypeError(
             f"Expected argument to be PrimFunc or IRModule, but received {type(func_or_mod)}"
         )
-    return _ffi_api.calculate_allocated_bytes(func_or_mod)  # type: ignore
+    return _ffi_api.calculate_allocated_bytes(func_or_mod)  # type: ignore # pylint: disable=no-member
 
 
 def detect_buffer_access_lca(func: PrimFunc) -> Dict[Buffer, Stmt]:
@@ -380,7 +378,7 @@ def OOBChecker():
     fpass : tvm.transform.Pass
         The result pass
     """
-    return _ffi_api.OOBChecker()  # type: ignore
+    return _ffi_api.OOBChecker()  # type: ignore # pylint: disable=no-member
 
 
 def find_anchor_block(mod: IRModule) -> Block:
@@ -438,8 +436,8 @@ def is_annotate_with_parallel(inst: Instruction) -> bool:
     return _ffi_api.is_annotate_with_parallel(inst)  # type: ignore # pylint: disable=no-member
 
 
-def get_possible_parallel_annotate_decisions(sch: Schedule, trace: Trace, rand_state: np.int64,
-                                             inst: Instruction, max_parallel_extent: np.int64):
+def get_possible_parallel_annotate_decisions(sch: Schedule, trace: Trace, rand_state: int,
+                                             inst: Instruction, max_parallel_extent: int):
     """Gets all possible parralel annotate decisions for a given annotate instruction
 
     Parameters
@@ -450,13 +448,13 @@ def get_possible_parallel_annotate_decisions(sch: Schedule, trace: Trace, rand_s
     trace: tvm.tir.Trace
         The trace the parallel annotate instruction is in
 
-    rand_state: np.int64
+    rand_state: int
         The random state
 
     inst: tvm.tir.Instruction
         The annotate instrcution with "meta_schedule.parallel" as annotation key
 
-    max_parallel_extent: np.int64
+    max_parallel_extent: int
         The maximum parallel extent (num_cores * jobs_per_core)
 
     Returns
@@ -464,7 +462,9 @@ def get_possible_parallel_annotate_decisions(sch: Schedule, trace: Trace, rand_s
     all_possible_ann_vals: List[int]
         The possible annotation values
     """
-    return list(_ffi_api.get_possible_parallel_annotate_decisions(sch, trace, rand_state, inst, max_parallel_extent))
+    return list(_ffi_api.get_possible_parallel_annotate_decisions(  # type: ignore # pylint: disable=no-member
+        sch, trace, rand_state, inst, max_parallel_extent))
+
 
 
 def collect_compute_location_indices(sch: Schedule, block: BlockRV) -> List[IntImm]:
@@ -483,7 +483,7 @@ def collect_compute_location_indices(sch: Schedule, block: BlockRV) -> List[IntI
     All the feasible compute-at locations of the input block, given as a list of their indices
     among the outer loops of the input block.
     """
-    return list(_ffi_api.collect_compute_location_indices(sch, block))
+    return list(_ffi_api.collect_compute_location_indices(sch, block))  # type: ignore # pylint: disable=no-member
 
 
 def is_pure_function(func: PrimFunc) -> bool:
