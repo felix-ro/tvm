@@ -643,6 +643,41 @@ std::tuple</*exists=*/bool,
            /*no_shift_read=*/bool>
 AnalyzeReadWritePattern(const BufferRegion& read_region, const BufferRegion& write_region);
 
+/*! \brief A possible annotation candidate */
+struct ParallelAnnotationCandidate {
+  /*! \brief The annotation instruction */
+  Instruction inst;
+  /*! \brief The current parallel extent */
+  int64_t parallel_extent;
+  /*! \brief The name of the root block */
+  String block_name;
+  /*! \brief The name of the PrimFunc */
+  String func_name;
+};
+
+/*!
+ * \brief Get an instruction that annotates the maximum parallel extent
+ * \param trace The trace to be mutated
+ * \param candidate The candidate to be mutated
+ * \param ann_inst 
+ * \return Whether a decision is found
+ */
+bool FindParallelDecision(const Trace& trace, ParallelAnnotationCandidate* candidate,
+                          const InstructionNode* ann_inst);
+
+/*!
+ * \brief Get all possible parallel annotate decisions
+ * \param sch The schedule the annotation is in
+ * \param trace The trace with the parallel annotate instruction
+ * \param ann_inst The parallel annotate instruction
+ * \param max_parallel_extent The maximum parallel extent (num_cores * jobs_per_core)
+ * \return All possible annotation values
+ */
+Array<Integer> GetPossibleParallelAnnotateDecisions(const Schedule& sch,
+                                                    const Trace& trace,
+                                                    const Instruction ann_inst,
+                                                    const int64_t max_parallel_extent_);
+
 /*!
  * \brief Check if the block is a data parallel block, i.e. all the block vars are data parallel
  * \param block_sref The block to be checked

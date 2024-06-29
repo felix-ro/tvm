@@ -436,8 +436,8 @@ def is_annotate_with_parallel(inst: Instruction) -> bool:
     return _ffi_api.is_annotate_with_parallel(inst)  # type: ignore # pylint: disable=no-member
 
 
-def get_possible_parallel_annotate_decisions(sch: Schedule, trace: Trace, rand_state: int,
-                                             inst: Instruction, max_parallel_extent: int):
+def get_possible_parallel_annotate_decisions(sch: Schedule, trace: Trace, inst: Instruction,
+                                             max_parallel_extent: int):
     """Gets all possible parralel annotate decisions for a given annotate instruction
 
     Parameters
@@ -447,9 +447,6 @@ def get_possible_parallel_annotate_decisions(sch: Schedule, trace: Trace, rand_s
 
     trace: tvm.tir.Trace
         The trace the parallel annotate instruction is in
-
-    rand_state: int
-        The random state
 
     inst: tvm.tir.Instruction
         The annotate instrcution with "meta_schedule.parallel" as annotation key
@@ -462,9 +459,8 @@ def get_possible_parallel_annotate_decisions(sch: Schedule, trace: Trace, rand_s
     all_possible_ann_vals: List[int]
         The possible annotation values
     """
-    return list(_ffi_api.get_possible_parallel_annotate_decisions(  # type: ignore # pylint: disable=no-member
-        sch, trace, rand_state, inst, max_parallel_extent))
-
+    return list(_ffi_api.GetPossibleParallelAnnotateDecisions(  # type: ignore # pylint: disable=no-member
+        sch, trace, inst, max_parallel_extent))
 
 
 def collect_compute_location_indices(sch: Schedule, block: BlockRV) -> List[IntImm]:

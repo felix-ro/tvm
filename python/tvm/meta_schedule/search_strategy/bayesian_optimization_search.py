@@ -1047,7 +1047,6 @@ class BayOptTuner:
                 possible_decisions = list(get_possible_parallel_annotate_decisions(
                                                      sch=sch,
                                                      trace=sch.trace,
-                                                     rand_state=forkseed(self.rand_state),
                                                      inst=inst,
                                                      max_parallel_extent=16*cpu_count(
                                                          logical=True)))
