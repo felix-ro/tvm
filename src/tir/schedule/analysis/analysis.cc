@@ -1021,6 +1021,20 @@ std::pair<Array<StmtSRef>, std::vector<int>> CollectComputeLocation(const Schedu
   return std::make_pair(location_srefs, location_indices);
 }
 
+TVM_REGISTER_GLOBAL("tir.analysis.CollectComputeLocationIndices")
+  .set_body_typed([](const Schedule sch, const BlockRV block) {
+    ScheduleState sch_state = sch->state();
+    StmtSRef block_sref = sch->GetSRef(Downcast<BlockRV>(block));
+    auto [location_srefs, location_indices] = CollectComputeLocation(sch_state, block_sref);
+  
+    Array<Integer> arr;
+    arr.reserve(location_indices.size());
+    for (int& loc : location_indices) {
+      arr.push_back(loc);
+    }
+    return arr;
+  });  
+
 /******** Producer-consumer relation ********/
 
 Array<StmtSRef> GetProducers(const StmtSRef& block_sref, const BlockScope& scope) {

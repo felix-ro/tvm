@@ -483,7 +483,7 @@ def collect_compute_location_indices(sch: Schedule, block: BlockRV) -> List[IntI
     All the feasible compute-at locations of the input block, given as a list of their indices
     among the outer loops of the input block.
     """
-    return list(_ffi_api.collect_compute_location_indices(sch, block))  # type: ignore # pylint: disable=no-member
+    return list(_ffi_api.CollectComputeLocationIndices(sch, block))  # type: ignore # pylint: disable=no-member
 
 
 def is_pure_function(func: PrimFunc) -> bool:
