@@ -1804,7 +1804,7 @@ class BayOptTuner:
         sch: Optional[Schedule]
             Returns schedule with changed annotation if successful
         """
-        trace = trace.change_annotation_in_trace(ann_inst, ann_val)
+        trace = trace.with_annotation(ann_inst, ann_val)
 
         return create_schedule_from_trace(mod=mod, trace=trace, postprocs=self.postprocs,
                                           rand_state=forkseed(self.rand_state),

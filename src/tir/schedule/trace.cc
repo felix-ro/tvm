@@ -505,6 +505,21 @@ Trace TraceNode::Simplified(bool remove_postproc) const {
                Map<Instruction, ObjectRef>(new_decisions));
 }
 
+Trace TraceNode::WithAnnotation(Instruction ann_inst, Integer ann_val) const {
+  Array<Instruction> insts;
+  insts.reserve(this->insts.size());
+  for (const Instruction& inst : this->insts) {
+    if (inst.same_as(ann_inst)) {
+      insts.push_back(ReplaceAnnValue(ann_inst, ann_val.IntValue()));
+    } else if (inst->kind->IsPostproc()) {
+      break;
+    } else {
+      insts.push_back(inst);
+    }
+  }
+  return Trace(insts, this->decisions);
+}
+
 /**************** Repr ****************/
 
 TVM_STATIC_IR_FUNCTOR(ReprPrinter, vtable)
@@ -580,6 +595,8 @@ TVM_REGISTER_GLOBAL("tir.schedule.TraceAsPython").set_body_method<Trace>(&TraceN
 TVM_REGISTER_GLOBAL("tir.schedule.TraceWithDecision")
     .set_body_method<Trace>(&TraceNode::WithDecision);
 TVM_REGISTER_GLOBAL("tir.schedule.TraceSimplified").set_body_method<Trace>(&TraceNode::Simplified);
+TVM_REGISTER_GLOBAL("tir.schedule.TraceWithAnnotation")
+    .set_body_method<Trace>(&TraceNode::WithAnnotation);
 TVM_REGISTER_GLOBAL("tir.schedule.TraceApplyJSONToSchedule")
     .set_body_typed(Trace::ApplyJSONToSchedule);
 

@@ -115,39 +115,11 @@ Array<Integer> GetPossibleParallelAnnotateDecisions(const Schedule& sch, const T
   return arr; 
 }
 
-TVM_REGISTER_GLOBAL("tir.analysis.get_possible_parallel_annotate_decisions").set_body_typed([](
-  const Schedule sch, const Trace trace, TRandState rand_state,
-  Instruction ann_inst, const Integer max_parallel_extent) {
-
-  return GetPossibleParallelAnnotateDecisions(sch, trace, &rand_state, &ann_inst, max_parallel_extent.IntValue());
-});              
-
-/*!
- * \brief Changes the annotation value of an instruction in a trace
- * \param trace The trace which includes the annotate instruction
- * \param ann_inst The annotate instruction
- * \param ann_val The new annotation value
- * \return The updated Trace
- */
-Trace ChangeAnnotationInTrace(const Trace trace, const Instruction ann_inst, const int64_t ann_val) {
-  Array<Instruction> insts;
-  insts.reserve(trace->insts.size());
-  for (const Instruction& inst : trace->insts) {
-    if (inst.same_as(ann_inst)) {
-      insts.push_back(tir::ReplaceAnnValue(ann_inst, ann_val));
-    } else if (inst->kind->IsPostproc()) {
-      break;
-    } else {
-      insts.push_back(inst);
-    }
-  }
-  return Trace(insts, trace->decisions);
-}
-
-TVM_REGISTER_GLOBAL("tir.schedule.change_annotation_in_trace").set_body_typed([](
-  const Trace trace, Instruction ann_inst, const Integer ann_val) {
-  return ChangeAnnotationInTrace(trace, ann_inst, ann_val.IntValue());
-});     
-
+TVM_REGISTER_GLOBAL("tir.analysis.get_possible_parallel_annotate_decisions")
+  .set_body_typed([](
+    const Schedule sch, const Trace trace, TRandState rand_state,
+    Instruction ann_inst, const Integer max_parallel_extent) {
+    return GetPossibleParallelAnnotateDecisions(sch, trace, &rand_state, &ann_inst, max_parallel_extent.IntValue());
+  });                  
 }  // namespace meta_schedule
 }  // namespace tvm
