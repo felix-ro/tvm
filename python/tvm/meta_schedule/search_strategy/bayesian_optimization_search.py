@@ -1047,7 +1047,6 @@ class BayOptTuner:
                 possible_decisions = list(get_possible_parallel_annotate_decisions(
                                                      sch=sch,
                                                      trace=sch.trace,
-                                                     rand_state=forkseed(self.rand_state),
                                                      inst=inst,
                                                      max_parallel_extent=16*cpu_count(
                                                          logical=True)))
@@ -1804,7 +1803,7 @@ class BayOptTuner:
         sch: Optional[Schedule]
             Returns schedule with changed annotation if successful
         """
-        trace = trace.change_annotation_in_trace(ann_inst, ann_val)
+        trace = trace.with_annotation(ann_inst, ann_val)
 
         return create_schedule_from_trace(mod=mod, trace=trace, postprocs=self.postprocs,
                                           rand_state=forkseed(self.rand_state),

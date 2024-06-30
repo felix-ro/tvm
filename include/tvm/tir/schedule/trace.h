@@ -132,6 +132,13 @@ class TraceNode : public runtime::Object {
    * \return A simplified trace
    */
   Trace Simplified(bool remove_postproc) const;
+  /*!
+   * \brief Changes the annotation value of an instruction in a trace
+   * \param ann_inst The annotate instruction
+   * \param ann_val The new annotation value
+   * \return The updated Trace
+   */
+  Trace WithAnnotation(Instruction ann_inst, Integer ann_val) const;
 };
 
 /*!

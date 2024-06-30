@@ -1021,6 +1021,20 @@ std::pair<Array<StmtSRef>, std::vector<int>> CollectComputeLocation(const Schedu
   return std::make_pair(location_srefs, location_indices);
 }
 
+TVM_REGISTER_GLOBAL("tir.analysis.CollectComputeLocationIndices")
+  .set_body_typed([](const Schedule sch, const BlockRV block) {
+    ScheduleState sch_state = sch->state();
+    StmtSRef block_sref = sch->GetSRef(Downcast<BlockRV>(block));
+    auto [location_srefs, location_indices] = CollectComputeLocation(sch_state, block_sref);
+  
+    Array<Integer> arr;
+    arr.reserve(location_indices.size());
+    for (int& loc : location_indices) {
+      arr.push_back(loc);
+    }
+    return arr;
+  });  
+
 /******** Producer-consumer relation ********/
 
 Array<StmtSRef> GetProducers(const StmtSRef& block_sref, const BlockScope& scope) {
@@ -1425,6 +1439,70 @@ AnalyzeReadWritePattern(const BufferRegion& read_region, const BufferRegion& wri
   return std::make_tuple(/*exist=*/true, surjective, injective, ordered, no_const_read,
                          no_shift_read);
 }
+
+/******** Parallel Annotation Decisions ********/
+
+bool FindParallelDecision(const Trace& trace, ParallelAnnotationCandidate* candidate,
+                          const InstructionNode* ann_inst) {  
+  std::unordered_map<const BlockRVNode*, const InstructionNode*> get_block_insts;
+  get_block_insts.reserve(trace->insts.size());
+  for (const Instruction& inst : trace->insts) {
+    if (const BlockRVNode* block_rv = GetInstGetBlockOutput(inst)) {
+      get_block_insts[block_rv] = inst.get();
+    }
+  }
+
+  ICHECK_EQ(ann_inst->inputs.size(), 2);
+  const InstructionNode* get_block_inst =
+      get_block_insts.at(Downcast<BlockRV>(ann_inst->inputs[0]).get());
+  ICHECK_EQ(get_block_inst->attrs.size(), 2);
+
+  candidate->inst = GetRef<Instruction>(ann_inst);
+  candidate->parallel_extent = Downcast<IntImm>(ann_inst->inputs[1])->value;
+  candidate->block_name = Downcast<String>(get_block_inst->attrs[0]);
+  candidate->func_name = Downcast<String>(get_block_inst->attrs[1]);
+  return true;
+}
+
+Array<Integer> GetPossibleParallelAnnotateDecisions(const Schedule& sch,
+                                                    const Trace& trace,
+                                                    const Instruction ann_inst,
+                                                    const int64_t max_parallel_extent_) {
+  // Step 1. Find a parallel decision.
+  ParallelAnnotationCandidate candidate;
+  const InstructionNode* inst = ann_inst.get();
+  FindParallelDecision(trace, &candidate, inst);
+
+  // Step 2. Find all possible parallel plans.
+  std::vector<std::vector<int64_t>> loop_extent_prods = AnalyzeParallel(
+      sch->state(), candidate.block_name, candidate.func_name, max_parallel_extent_);
+  std::unordered_map<int64_t, std::vector<int>> limit2plan;
+  std::map<std::vector<int>, int64_t> plan2limit;
+  for (const std::vector<int64_t>& prods : loop_extent_prods) {
+    for (int64_t limit : prods) {
+      if (limit <= max_parallel_extent_ && !limit2plan.count(limit)) {
+        std::vector<int> plan = GetNumFusedLoops(loop_extent_prods, limit);
+        limit2plan[limit] = plan;
+        plan2limit[plan] = limit;
+      }
+    }
+  }
+  
+  // Step 3. Prepare array with all possible decisions.
+  Array<Integer> arr;
+  arr.reserve(plan2limit.size());
+  for (const auto& pair : plan2limit) {
+    arr.push_back(pair.second);
+  }
+  return arr; 
+}
+
+TVM_REGISTER_GLOBAL("tir.analysis.GetPossibleParallelAnnotateDecisions")
+  .set_body_typed([](const Schedule sch, const Trace trace, const Instruction ann_inst,
+    const Integer max_parallel_extent) {
+      return GetPossibleParallelAnnotateDecisions(sch, trace, ann_inst,
+                                                  max_parallel_extent.IntValue());
+  }); 
 
 /******** Storage Scope ********/
 
