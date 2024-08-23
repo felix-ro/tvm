@@ -31,7 +31,8 @@ def test_unary():
     class Model(Module):
         def test(self, x: Tensor):
             z0 = op.square(x)
-            return (x,)
+            z1 = op.sqrt(x)
+            return (z0, z1)
 
     # fmt: off
     @R.function
@@ -39,7 +40,8 @@ def test_unary():
         R.func_attr({"num_input": 2})
         with R.dataflow():
             square: R.Tensor((1, 10), dtype="float32") = R.square(x)
-            gv1 = (x,), (_io,)
+            sqrt: R.Tensor((1, 10), dtype="float32") = R.sqrt(x)
+            gv1 = (square, sqrt), (_io,)
             R.output(gv1)
         return gv1
     # fmt: on
@@ -945,11 +947,11 @@ def test_sample_top_p_top_k_from_sorted_prob():
     class Expected:
         @T.prim_func(private=True)
         def get_index_from_sorted(A: T.handle, B: T.handle, C: T.handle, D: T.handle, E: T.handle, F: T.handle):
-            batch, vocab_size = T.int64(), T.int64()
+            batch, vocab_size = T.int64(is_size_var=True), T.int64(is_size_var=True)
             cumsum_sorted = T.match_buffer(A, (batch, vocab_size))
             indices = T.match_buffer(B, (batch, vocab_size), "int64")
             renorm_prob = T.match_buffer(C, (batch, 1))
-            out_batch = T.int64()
+            out_batch = T.int64(is_size_var=True)
             usample = T.match_buffer(D, (out_batch, 1))
             sample_indices = T.match_buffer(E, (out_batch, 1), "int64")
             output_index = T.match_buffer(F, (out_batch, 1), "int64")
@@ -968,7 +970,7 @@ def test_sample_top_p_top_k_from_sorted_prob():
 
         @T.prim_func(private=True)
         def get_renorm_prob(A: T.handle, B: T.handle, C: T.handle, D: T.handle):
-            batch, vocab_size = T.int64(), T.int64()
+            batch, vocab_size = T.int64(is_size_var=True), T.int64(is_size_var=True)
             cumsum_sorted = T.match_buffer(A, (batch, vocab_size))
             top_p = T.match_buffer(B, (batch, 1))
             top_k = T.match_buffer(C, (batch, 1), "int64")

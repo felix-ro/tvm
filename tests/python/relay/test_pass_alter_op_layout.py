@@ -74,7 +74,7 @@ def test_alter_op():
         a = run_opt_pass(a, transform.AlterOpLayout())
         b = run_opt_pass(expected(), transform.InferType())
 
-    assert tvm.ir.structural_equal(a, b), "Actual = \n" + str(a)
+    tvm.ir.assert_structural_equal(a, b)
 
 
 def test_alter_return_none():
@@ -97,7 +97,7 @@ def test_alter_return_none():
         a = run_opt_pass(a, transform.AlterOpLayout())
         b = run_opt_pass(before(), transform.InferType())
 
-    assert tvm.ir.structural_equal(a, b), "Actual = \n" + str(a)
+    tvm.ir.assert_structural_equal(a, b)
     assert called[0]
 
 
@@ -162,7 +162,7 @@ def test_alter_layout():
         a = run_opt_pass(a, [transform.CanonicalizeOps(), transform.AlterOpLayout()])
         b = run_opt_pass(expected(), transform.InferType())
 
-    assert tvm.ir.structural_equal(a, b), "Actual = \n" + str(a)
+    tvm.ir.assert_structural_equal(a, b)
 
 
 def test_alter_layout_multi():
@@ -208,7 +208,7 @@ def test_alter_layout_multi():
         a = run_opt_pass(a, [transform.CanonicalizeOps(), transform.AlterOpLayout()])
         b = run_opt_pass(expected(), transform.InferType())
 
-    assert tvm.ir.structural_equal(a, b), "Actual = \n" + str(a)
+    tvm.ir.assert_structural_equal(a, b)
 
 
 def test_alter_layout_lrn():
@@ -260,7 +260,7 @@ def test_alter_layout_lrn():
         a = run_opt_pass(a, [transform.CanonicalizeOps(), transform.AlterOpLayout()])
         b = run_opt_pass(expected(), transform.InferType())
 
-    assert tvm.ir.structural_equal(a, b), "Actual = \n" + str(a)
+    tvm.ir.assert_structural_equal(a, b)
 
 
 def test_alter_layout_dual_path():
@@ -313,7 +313,7 @@ def test_alter_layout_dual_path():
         a = run_opt_pass(a, transform.AlterOpLayout())
         b = run_opt_pass(expected(), transform.InferType())
 
-    assert tvm.ir.structural_equal(a, b), "Actual = \n" + str(a)
+    tvm.ir.assert_structural_equal(a, b)
 
 
 def test_alter_layout_resnet():
@@ -361,7 +361,7 @@ def test_alter_layout_resnet():
         a = run_opt_pass(a, transform.AlterOpLayout())
         b = run_opt_pass(expected(), transform.InferType())
 
-    assert tvm.ir.structural_equal(a, b), "Actual = \n" + str(a)
+    tvm.ir.assert_structural_equal(a, b)
 
 
 def test_alter_layout_broadcast_op():
@@ -409,7 +409,7 @@ def test_alter_layout_broadcast_op():
         a = run_opt_pass(a, [transform.CanonicalizeOps(), transform.AlterOpLayout()])
         b = run_opt_pass(expected(), transform.InferType())
 
-    assert tvm.ir.structural_equal(a, b), "Actual = \n" + str(a)
+    tvm.ir.assert_structural_equal(a, b)
 
 
 def test_alter_layout_broadcast_scalar_op():
@@ -468,7 +468,7 @@ def test_alter_layout_broadcast_scalar_op():
         a = run_opt_pass(a, [transform.CanonicalizeOps(), transform.AlterOpLayout()])
         b = run_opt_pass(expected(), transform.InferType())
 
-    assert tvm.ir.structural_equal(a, b), "Actual = \n" + str(a)
+    tvm.ir.assert_structural_equal(a, b)
 
 
 def test_alter_layout_scalar():
@@ -509,7 +509,7 @@ def test_alter_layout_scalar():
         a = run_opt_pass(a, [transform.CanonicalizeOps(), transform.AlterOpLayout()])
         b = run_opt_pass(expected(), transform.InferType())
 
-    assert tvm.ir.structural_equal(a, b), "Actual = \n" + str(a)
+    tvm.ir.assert_structural_equal(a, b)
 
 
 def test_alter_layout_scalar_regression():
@@ -599,7 +599,7 @@ def test_alter_layout_scalar_regression():
         )
         b = run_opt_pass(expected(), transform.InferType())
 
-    assert tvm.ir.structural_equal(a, b), "Actual = \n" + str(a)
+    tvm.ir.assert_structural_equal(a, b)
 
 
 def test_alter_layout_concatenate():
@@ -643,7 +643,7 @@ def test_alter_layout_concatenate():
         a = run_opt_pass(a, transform.AlterOpLayout())
         b = run_opt_pass(expected_nchw(), transform.InferType())
 
-    assert tvm.ir.structural_equal(a, b), "Actual = \n" + str(a)
+    tvm.ir.assert_structural_equal(a, b)
 
     # NHWC layout transformation.
     def before_nhwc():
@@ -681,7 +681,7 @@ def test_alter_layout_concatenate():
         a = run_opt_pass(a, transform.AlterOpLayout())
         b = run_opt_pass(expected_nhwc(), transform.InferType())
 
-    assert tvm.ir.structural_equal(a, b), "Actual = \n" + str(a)
+    tvm.ir.assert_structural_equal(a, b)
 
 
 def test_alter_layout_nchw_upsamping_op():
@@ -720,7 +720,7 @@ def test_alter_layout_nchw_upsamping_op():
         a = run_opt_pass(a, transform.AlterOpLayout())
         b = run_opt_pass(expected(), transform.InferType())
 
-    assert tvm.ir.structural_equal(a, b), "Actual = \n" + str(a)
+    tvm.ir.assert_structural_equal(a, b)
 
 
 def test_alter_layout_nchw_dyn_upsamping_op():
@@ -759,7 +759,7 @@ def test_alter_layout_nchw_dyn_upsamping_op():
         a = run_opt_pass(a, transform.AlterOpLayout())
         b = run_opt_pass(expected(), transform.InferType())
 
-    assert tvm.ir.structural_equal(a, b), "Actual = \n" + str(a)
+    tvm.ir.assert_structural_equal(a, b)
 
 
 @tvm.testing.parametrize_targets("llvm")
@@ -872,7 +872,7 @@ def test_alter_layout_strided_slice_axes_nhwc():
     mod_new = tvm.IRModule()
     mod_before["main"] = a
     mod_new["main"] = b
-    assert tvm.ir.structural_equal(mod_before, mod_new)
+    tvm.ir.assert_structural_equal(mod_before, mod_new)
 
 
 def test_alter_layout_depthwise_conv2d():
@@ -916,7 +916,7 @@ def test_alter_layout_depthwise_conv2d():
         a = run_opt_pass(a, [transform.CanonicalizeOps(), transform.AlterOpLayout()])
         b = run_opt_pass(expected(), transform.InferType())
 
-    assert tvm.ir.structural_equal(a, b)
+    tvm.ir.assert_structural_equal(a, b)
 
 
 def test_alter_layout_prelu():
@@ -956,7 +956,7 @@ def test_alter_layout_prelu():
         a = run_opt_pass(a, [transform.CanonicalizeOps(), transform.AlterOpLayout()])
         b = run_opt_pass(expected(), transform.InferType())
 
-    assert tvm.ir.structural_equal(a, b)
+    tvm.ir.assert_structural_equal(a, b)
 
 
 def test_alter_layout_pad():
@@ -994,7 +994,7 @@ def test_alter_layout_pad():
         a = run_opt_pass(a, transform.AlterOpLayout())
         b = run_opt_pass(expected_nchw(), transform.InferType())
 
-    assert tvm.ir.structural_equal(a, b), "Actual = \n" + str(a)
+    tvm.ir.assert_structural_equal(a, b)
 
     # Check NHWC conversion.
     def before_nhwc():
@@ -1024,7 +1024,7 @@ def test_alter_layout_pad():
         a = run_opt_pass(a, transform.AlterOpLayout())
         b = run_opt_pass(expected_nhwc(), transform.InferType())
 
-    assert tvm.ir.structural_equal(a, b), "Actual = \n" + str(a)
+    tvm.ir.assert_structural_equal(a, b)
 
     # Check that conversion does not happen when padding along split axis.
     def before():
@@ -1052,7 +1052,7 @@ def test_alter_layout_pad():
         a = run_opt_pass(a, transform.AlterOpLayout())
         b = run_opt_pass(expected(), transform.InferType())
 
-    assert tvm.ir.structural_equal(a, b), "Actual = \n" + str(a)
+    tvm.ir.assert_structural_equal(a, b)
 
 
 def test_alter_layout_pool():
@@ -1090,7 +1090,7 @@ def test_alter_layout_pool():
         a = run_opt_pass(a, transform.AlterOpLayout())
         b = run_opt_pass(expected_nchw(), transform.InferType())
 
-    assert tvm.ir.structural_equal(a, b), "Actual = \n" + str(a)
+    tvm.ir.assert_structural_equal(a, b)
 
     # Check NHWC conversion.
     def before_nhwc():
@@ -1120,7 +1120,7 @@ def test_alter_layout_pool():
         a = run_opt_pass(a, transform.AlterOpLayout())
         b = run_opt_pass(expected_nhwc(), transform.InferType())
 
-    assert tvm.ir.structural_equal(a, b), "Actual = \n" + str(a)
+    tvm.ir.assert_structural_equal(a, b)
 
 
 def test_alter_layout_sum():
@@ -1158,7 +1158,7 @@ def test_alter_layout_sum():
         a = run_opt_pass(a, transform.AlterOpLayout())
         b = run_opt_pass(expected_nchw(), transform.InferType())
 
-    assert tvm.ir.structural_equal(a, b), "Actual = \n" + str(a)
+    tvm.ir.assert_structural_equal(a, b)
 
     # Check NHWC conversion.
     def before_nhwc():
@@ -1188,7 +1188,7 @@ def test_alter_layout_sum():
         a = run_opt_pass(a, transform.AlterOpLayout())
         b = run_opt_pass(expected_nhwc(), transform.InferType())
 
-    assert tvm.ir.structural_equal(a, b), "Actual = \n" + str(a)
+    tvm.ir.assert_structural_equal(a, b)
 
 
 def test_alter_layout_nhwc_arm():
@@ -1225,7 +1225,7 @@ def test_alter_layout_nhwc_arm():
         a = run_opt_pass(a, transform.AlterOpLayout())
         b = run_opt_pass(expected_nhwc(), transform.InferType())
 
-    assert tvm.ir.structural_equal(a, b), "Actual = \n" + str(a)
+    tvm.ir.assert_structural_equal(a, b)
 
 
 def test_alter_layout_nhwc_int8_aarch64():
@@ -1302,7 +1302,7 @@ def test_alter_layout_nhwc_int8_aarch64():
         a = run_opt_pass(a, transform.AlterOpLayout())
         b = run_opt_pass(expected_nhwc_int8(), transform.InferType())
 
-    assert tvm.ir.structural_equal(a, b), "Actual = \n" + str(a)
+    tvm.ir.assert_structural_equal(a, b)
 
 
 def test_alter_op_with_global_var():
@@ -1349,7 +1349,7 @@ def test_alter_op_with_global_var():
         a = transform.AlterOpLayout()(a)
         b = transform.InferType()(expected())
 
-    assert tvm.ir.structural_equal(a, b, map_free_vars=True), "Actual = \n" + str(a)
+    tvm.ir.assert_structural_equal(a, b, map_free_vars=True)
 
 
 def test_alter_op_dense():
@@ -1383,7 +1383,7 @@ def test_alter_op_dense():
             a = before()
             a = run_opt_pass(a, transform.AlterOpLayout())
             b = run_opt_pass(expected(), transform.InferType())
-            assert tvm.ir.structural_equal(a, b)
+            tvm.ir.assert_structural_equal(a, b)
 
 
 def test_not_inplace_modify():
@@ -1449,7 +1449,7 @@ def test_alter_op_dense_packed_data():
         ):
             a = run_opt_pass(before(), transform.AlterOpLayout())
             b = run_opt_pass(expected(), transform.InferType())
-            assert tvm.ir.structural_equal(a, b)
+            tvm.ir.assert_structural_equal(a, b)
 
 
 @pytest.mark.skipif(
@@ -1467,11 +1467,34 @@ def test_alter_op_dense_arm_cpu_sme_float32():
 
     def expected():
         x = relay.var("x", shape=(32, 32), dtype="float32")
-        y = relay.const(y_data.transpose(), dtype="float32")
+        y = relay.transpose(relay.const(y_data, dtype="float32"))
         matmul = relay.nn.matmul(x, y)
         return relay.Function(analysis.free_vars(matmul), matmul)
 
     with tvm.target.Target("llvm -mtriple=aarch64-linux-gnu -mattr=+v9.2a,+sme"):
+        with TempOpAttr("nn.dense", "FTVMAlterOpLayout", topi.arm_cpu.dense_alter_op._alter_dense):
+            a = run_opt_pass(before(), transform.AlterOpLayout())
+            b = run_opt_pass(expected(), transform.InferType())
+            tvm.ir.assert_structural_equal(a, b)
+
+
+def test_alter_op_dense_arm_cpu_neon():
+    np.random.seed(0)
+    y_data = np.random.uniform(size=(64, 32)).astype("float32")
+
+    def before():
+        x = relay.var("x", shape=(32, 32), dtype="float32")
+        y = relay.const(y_data, dtype="float32")
+        dense = relay.nn.dense(x, y)
+        return relay.Function(analysis.free_vars(dense), dense)
+
+    def expected():
+        x = relay.var("x", shape=(32, 32), dtype="float32")
+        y = relay.transpose(relay.const(y_data, dtype="float32"))
+        matmul = relay.nn.matmul(x, y)
+        return relay.Function(analysis.free_vars(matmul), matmul)
+
+    with tvm.target.Target("llvm -mtriple=aarch64-linux-gnu -mattr=+v8.6a,+neon"):
         with TempOpAttr("nn.dense", "FTVMAlterOpLayout", topi.arm_cpu.dense_alter_op._alter_dense):
             a = run_opt_pass(before(), transform.AlterOpLayout())
             b = run_opt_pass(expected(), transform.InferType())
@@ -1505,16 +1528,14 @@ def test_alter_op_dense_arm_cpu_sme_float16_float32():
         with TempOpAttr("nn.dense", "FTVMAlterOpLayout", topi.arm_cpu.dense_alter_op._alter_dense):
             a = run_opt_pass(before(), transform.AlterOpLayout())
             b = run_opt_pass(expected(), transform.InferType())
-            assert tvm.ir.structural_equal(a, b)
+            tvm.ir.assert_structural_equal(a, b)
 
 
 @pytest.mark.skipif(
     llvm_version_major() < 17, reason="SME is not supported in earlier versions of LLVM"
 )
-@pytest.mark.parametrize(
-    "transpose_b,transform_b", [(False, lambda x: x), (True, lambda x: x.transpose())]
-)
-def test_alter_op_matmul_arm_cpu_sme(transpose_b, transform_b):
+@pytest.mark.parametrize("transpose_b", [False, True])
+def test_alter_op_matmul_arm_cpu_sme(transpose_b):
     np.random.seed(0)
     y_data = np.random.uniform(size=(64, 32)).astype("float32")
 
@@ -1526,7 +1547,9 @@ def test_alter_op_matmul_arm_cpu_sme(transpose_b, transform_b):
 
     def expected():
         x = relay.var("x", shape=(96, 32), dtype="float32")
-        y = relay.const(transform_b(y_data), dtype="float32")
+        y = relay.const(y_data, dtype="float32")
+        if transpose_b:
+            y = relay.transpose(y)
         matmul = relay.nn.matmul(x, y)
         return relay.Function(analysis.free_vars(matmul), matmul)
 
@@ -1534,7 +1557,7 @@ def test_alter_op_matmul_arm_cpu_sme(transpose_b, transform_b):
         with TempOpAttr("nn.dense", "FTVMAlterOpLayout", topi.arm_cpu.dense_alter_op._alter_dense):
             a = run_opt_pass(before(), transform.AlterOpLayout())
             b = run_opt_pass(expected(), transform.InferType())
-            assert tvm.ir.structural_equal(a, b)
+            tvm.ir.assert_structural_equal(a, b)
 
 
 def test_conv2d_strided_slice_packed_to_unpacked():
@@ -1583,7 +1606,7 @@ def test_conv2d_strided_slice_packed_to_unpacked():
     with TempOpAttr("nn.conv2d", "FTVMAlterOpLayout", alter_conv2d):
         a = run_opt_pass(before(), transform.AlterOpLayout())
         b = run_opt_pass(expected(), transform.InferType())
-        assert tvm.ir.structural_equal(a, b)
+        tvm.ir.assert_structural_equal(a, b)
 
 
 def test_conv2d_strided_slice_arbitrary_stride():
@@ -1675,7 +1698,7 @@ def test_alter_layout_nonscalar_broadcast():
     with TempOpAttr("nn.conv2d", "FTVMAlterOpLayout", alter_conv2d):
         a = run_opt_pass(before(), transform.AlterOpLayout())
         b = run_opt_pass(expected(), transform.InferType())
-        assert tvm.ir.structural_equal(a, b), "Actual = \n" + str(a) + "\nExpected = \n" + str(b)
+        tvm.ir.assert_structural_equal(a, b)
 
     inp = np.random.uniform(size=(1, 16, 3, 3)).astype(np.float32)
     weight = np.random.uniform(size=(16, 16, 1, 1)).astype(np.float32)
@@ -1737,7 +1760,7 @@ def test_alter_layout_blocked_no_broadcast():
     with TempOpAttr("nn.conv2d", "FTVMAlterOpLayout", alter_conv2d):
         a = run_opt_pass(before(), transform.AlterOpLayout())
         b = run_opt_pass(expected(), transform.InferType())
-        assert tvm.ir.structural_equal(a, b), "Actual = \n" + str(a) + "\nExpected = \n" + str(b)
+        tvm.ir.assert_structural_equal(a, b)
 
     inp = np.random.uniform(size=(1, 8, 16, 16, 4)).astype(np.float32)
     weight = np.random.uniform(size=(1, 8, 4, 4, 4, 4)).astype(np.float32)
@@ -1799,7 +1822,7 @@ def test_alter_layout_blocked_broadcast():
     with TempOpAttr("nn.conv2d", "FTVMAlterOpLayout", alter_conv2d):
         a = run_opt_pass(before(), transform.AlterOpLayout())
         b = run_opt_pass(expected(), transform.InferType())
-        assert tvm.ir.structural_equal(a, b), "Actual = \n" + str(a) + "\nExpected = \n" + str(b)
+        tvm.ir.assert_structural_equal(a, b)
 
     inp = np.random.uniform(size=(1, 8, 16, 16, 4)).astype(np.float32)
     weight = np.random.uniform(size=(1, 8, 4, 4, 4, 4)).astype(np.float32)
@@ -1887,7 +1910,7 @@ def test_alter_layout_re_blocking_broadcast():
     with TempOpAttr("nn.conv2d", "FTVMAlterOpLayout", alter_conv2d):
         a = run_opt_pass(before(), transform.AlterOpLayout())
         b = run_opt_pass(expected(), transform.InferType())
-        assert tvm.ir.structural_equal(a, b), "Actual = \n" + str(a) + "\nExpected = \n" + str(b)
+        tvm.ir.assert_structural_equal(a, b)
 
     inp = np.random.uniform(size=(1, 8, 16, 16, 4)).astype(np.float32)
     weight = np.random.uniform(size=(1, 8, 4, 4, 4, 4)).astype(np.float32)
@@ -1959,7 +1982,7 @@ def test_broadcast_non_adaptable():
     with TempOpAttr("nn.conv2d", "FTVMAlterOpLayout", alter_conv2d):
         a = run_opt_pass(before(), transform.AlterOpLayout())
         b = run_opt_pass(expected(), transform.InferType())
-        assert tvm.ir.structural_equal(a, b), "Actual = \n" + str(a) + "\nExpected = \n" + str(b)
+        tvm.ir.assert_structural_equal(a, b)
 
     inp = np.random.uniform(size=(1, 4, 3, 3, 4)).astype(np.float32)
     weight = np.random.uniform(size=(4, 4, 1, 1, 4, 4)).astype(np.float32)
@@ -2043,7 +2066,7 @@ def test_alter_with_subfunc():
     func = relay.Function([x1], x3)
     mod = tvm.IRModule.from_expr(func)
     mod = relay.transform.InferType()(mod)
-    assert tvm.ir.structural_equal(relay.transform.AlterOpLayout()(mod), mod)
+    tvm.ir.assert_structural_equal(relay.transform.AlterOpLayout()(mod), mod)
 
 
 def test_alter_with_reduce():

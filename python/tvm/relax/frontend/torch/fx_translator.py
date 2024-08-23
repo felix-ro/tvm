@@ -243,6 +243,23 @@ class TorchFXImporter:
         else:
             raise KeyError("Unregonized approximate algorithm for gelu: {}.".format(approximate))
 
+    def _hardsigmoid(self, node: fx.node.Node) -> relax.Var:
+        args = self.retrieve_args(node)
+        x = args[0]
+        dtype = x.struct_info.dtype
+        x0 = relax.op.add(x, relax.const(3, dtype))
+        x1 = relax.op.clip(x0, 0, 6)
+        return self.block_builder.emit(relax.op.divide(x1, relax.const(6, dtype)))
+
+    def _hardswish(self, node: fx.node.Node) -> relax.Var:
+        args = self.retrieve_args(node)
+        x = args[0]
+        dtype = x.struct_info.dtype
+        x0 = relax.op.add(x, relax.const(3, dtype))
+        x1 = relax.op.clip(x0, 0, 6)
+        x2 = relax.op.divide(x1, relax.const(6, dtype))
+        return self.block_builder.emit(relax.op.multiply(x, x2))
+
     ########## Compare ##########
 
     def _lt(self, node: fx.node.Node) -> relax.Expr:
@@ -501,6 +518,14 @@ class TorchFXImporter:
             res = bias if res is None else self.block_builder.emit(relax.op.add(res, bias))
         return res
 
+    def _einsum(self, node: fx.node.Node) -> relax.Var:
+        import torch  # type: ignore
+
+        args = self.retrieve_args(node)
+        if isinstance(args[1], (torch.Size, tuple, list)):
+            return self.block_builder.emit(relax.op.einsum(tuple(args[1]), args[0]))
+        return self.block_builder.emit(relax.op.einsum(args[1:], args[0]))
+
     ########## Manipulation ##########
 
     def _cat(self, node: fx.node.Node) -> relax.Var:
@@ -533,7 +558,11 @@ class TorchFXImporter:
         return self.block_builder.emit(relax.op.reshape(x, new_shape))
 
     def _permute(self, node: fx.node.Node) -> relax.Var:
+        import torch  # type: ignore
+
         args = self.retrieve_args(node)
+        if isinstance(args[1], (torch.Size, tuple, list)):
+            return self.block_builder.emit(relax.op.permute_dims(args[0], tuple(args[1])))
         return self.block_builder.emit(relax.op.permute_dims(args[0], args[1:]))
 
     def _reshape(self, node: fx.node.Node) -> relax.Var:
@@ -582,6 +611,14 @@ class TorchFXImporter:
         else:
             dim = None
         return self.block_builder.emit(relax.op.squeeze(x, dim))
+
+    def _tile(self, node: fx.node.Node) -> relax.Var:
+        import torch  # type: ignore
+
+        args = self.retrieve_args(node)
+        if isinstance(args[1], (torch.Size, tuple, list)):
+            return self.block_builder.emit(relax.op.tile(args[0], tuple(args[1])))
+        return self.block_builder.emit(relax.op.tile(args[0], args[1:]))
 
     def _cumsum(self, node: fx.node.Node) -> relax.Var:
         x = self.env[node.args[0]]
@@ -1358,6 +1395,8 @@ class TorchFXImporter:
             nn.Sigmoid: self._sigmoid,
             nn.Tanh: lambda node: self.block_builder.emit(relax.op.tanh(self.env[node.args[0]])),
             nn.SiLU: lambda node: self.block_builder.emit(relax.op.nn.silu(self.env[node.args[0]])),
+            nn.Hardsigmoid: self._hardsigmoid,
+            nn.Hardswish: self._hardswish,
             nn.Flatten: self._flatten,
             nn.BatchNorm2d: self._batch_norm_2d,
             nn.LayerNorm: self._layer_norm,
@@ -1419,6 +1458,7 @@ class TorchFXImporter:
             "permute": self._permute,
             "reshape": self._reshape,
             "split": self._split,
+            "tile": self._tile,
             "cumsum": self._cumsum,
             "chunk": self._chunk,
             "transpose": self._transpose,
@@ -1437,12 +1477,15 @@ class TorchFXImporter:
             "leaky_relu": self._leakyrelu,
             "gelu": self._gelu,
             "silu": lambda node: self.block_builder.emit(relax.op.nn.silu(self.env[node.args[0]])),
+            "hardsigmoid": self._hardsigmoid,
+            "hardswish": self._hardswish,
             "interpolate": self._interpolate,
             "size": self._size,
             "getattr": self._getattr,
             "getitem": self._getitem,
             "contiguous": lambda node: self.env[node.args[0]],
             "to": self._to,
+            "max_pool2d": self._max_pool2d,
             "avg_pool2d": self._avg_pool2d,
             "adaptive_avg_pool2d": self._adaptive_avg_pool2d(is_module=False),
             "layer_norm": self._layer_norm,
@@ -1457,6 +1500,7 @@ class TorchFXImporter:
             "max": self._max,
             "cross_entropy": self._cross_entropy,
             "scaled_dot_product_attention": self._scaled_dot_product_attention,
+            "einsum": self._einsum,
         }
 
     def update_convert_map(self, custom_convert_map: dict):
