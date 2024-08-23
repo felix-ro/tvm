@@ -871,6 +871,11 @@ requires_x86 = Feature(
     "x86", "x86 Architecture", run_time_check=lambda: platform.machine() == "x86_64"
 )
 
+# Mark a test as requiring the aarch64 Architecture to run.
+requires_aarch64 = Feature(
+    "AArch64", "AArch64 Architecture", run_time_check=lambda: platform.machine() == "aarch64"
+)
+
 # Mark a test as requiring the CUDA runtime.
 requires_cuda = Feature(
     "cuda",
@@ -943,6 +948,9 @@ requires_matrixcore = Feature(
     run_time_check=lambda: tvm.rocm().exist and rocm.have_matrixcore(tvm.rocm().compute_version),
     parent_features="rocm",
 )
+
+# Mark a test as requiring the hipBLAS library.
+requires_hipblas = Feature("hipblas", "hipBLAS", cmake_flag="USE_HIPBLAS", parent_features="rocm")
 
 # Mark a test as requiring the metal runtime
 requires_metal = Feature(
@@ -1906,6 +1914,21 @@ def xfail_parameterizations(*xfail_params, reason):
 
 def skip_parameterizations(*skip_params, reason):
     return _mark_parameterizations(*skip_params, marker_fn=pytest.skip, reason=reason)
+
+
+def strtobool(val):
+    """Convert a string representation of truth to true (1) or false (0).
+    True values are 'y', 'yes', 't', 'true', 'on', and '1'; false values
+    are 'n', 'no', 'f', 'false', 'off', and '0'.  Raises ValueError if
+    'val' is anything else.
+    """
+    val = val.lower()
+    if val in ("y", "yes", "t", "true", "on", "1"):
+        return 1
+    elif val in ("n", "no", "f", "false", "off", "0"):
+        return 0
+    else:
+        raise ValueError(f"invalid truth value {val!r}")
 
 
 def main():

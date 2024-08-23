@@ -107,6 +107,7 @@ tvm_option(USE_THRUST "Build with Thrust" OFF)
 tvm_option(USE_CURAND "Build with cuRAND" OFF)
 tvm_option(USE_MIOPEN "Build with ROCM:MIOpen" OFF)
 tvm_option(USE_ROCBLAS "Build with ROCM:RoCBLAS" OFF)
+tvm_option(USE_HIPBLAS "Build with ROCM:HIPBLAS" OFF)
 tvm_option(USE_SORT "Build with sort support" ON)
 tvm_option(USE_NNPACK "Build with nnpack support" OFF)
 tvm_option(USE_LIBTORCH "Build with libtorch support" OFF)
@@ -385,6 +386,12 @@ if(BUILD_FOR_HEXAGON)
 
   add_definitions(-D_MACH_I32=int)
   add_definitions(-DDMLC_CXX11_THREAD_LOCAL=0)
+endif()
+
+# distributed disco runtime are disabled for hexagon
+if (NOT BUILD_FOR_HEXAGON)
+  tvm_file_glob(GLOB RUNTIME_DISCO_DISTRIBUTED_SRCS src/runtime/disco/distributed/*.cc)
+  list(APPEND RUNTIME_SRCS ${RUNTIME_DISCO_DISTRIBUTED_SRCS})
 endif()
 
 # Package runtime rules

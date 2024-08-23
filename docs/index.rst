@@ -33,6 +33,8 @@ driving its costs down.
    :caption: Getting Started
 
    install/index
+   get_started/tutorials/quick_start
+   get_started/tutorials/ir_module
    contribute/index
 
 .. toctree::
@@ -51,23 +53,29 @@ driving its costs down.
 
 .. toctree::
    :maxdepth: 1
-   :caption: Architecture  Guide
+   :caption: API Reference
 
-   arch/index
+   reference/api/python/index
+   reference/api/links
 
 .. toctree::
    :maxdepth: 1
-   :caption: Topic Guides
+   :caption: Legacy
 
+   reference/langref/index
+   arch/index
    topic/microtvm/index
    topic/vta/index
 
 .. toctree::
    :maxdepth: 1
-   :caption: Reference Guide
+   :caption: About
 
-   reference/langref/index
-   reference/api/python/index
-   reference/api/links
    reference/publications
+   reference/security
+
+.. toctree::
+   :maxdepth: 1
+   :caption: Index
+
    genindex
