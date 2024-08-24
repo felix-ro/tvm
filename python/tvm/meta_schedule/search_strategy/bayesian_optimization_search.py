@@ -43,10 +43,11 @@ from tvm.tir import IntImm
 from tvm.ir import IRModule, make_node, structural_hash
 from tvm.runtime import String
 from .search_strategy import PySearchStrategy, MeasureCandidate, SearchStrategy
+from .search_utils import sample_initial_population
 from ..utils import derived_object, cpu_count
 from ..arg_info import ArgInfo
 from ..runner import RunnerResult
-from ..logging import get_logger, get_logging_func
+from ..logging import Logger, get_logger, get_logging_func
 from ..profiler import Profiler
 from ..cost_model import CostModel
 
@@ -55,6 +56,8 @@ if TYPE_CHECKING:
     from ..tune_context import TuneContext
     from ..postproc import Postproc
     from ..logging import Logger
+
+from timeit import default_timer as timer
 
 DECISION_TYPE = Any
 ATTR_TYPE = Any
@@ -341,7 +344,29 @@ def create_schedule_from_trace(mod: IRModule, trace: Trace, postprocs: List["Pos
     return sch
 
 
-def get_task_logger(task_name: str) -> Callable[[int, str, int, str], None]:
+def get_task_logger(task_name: str) -> Logger:
+    """Returns the logger for a tuning task
+    
+    Parameters
+    ----------
+    task_name: str
+        The name of the task we get the logger for
+
+    Returns
+    -------
+    logger: Logger
+        The task logger
+    """
+    logger_dict = logging.Logger.manager.loggerDict
+    logger_names = list(logger_dict.keys())
+    pattern = fr"tvm\.meta_schedule\.logging\.task_\d+_{task_name}$"
+    matching_strings = [s for s in logger_names if re.match(pattern, s)]
+    assert len(matching_strings) == 1
+    # (names are shortened to 100 characters see meta_schedule.logging.py)
+    return get_logger(matching_strings[0][:100])
+
+
+def get_task_logging_func(task_name: str) -> Callable[[int, str, int, str], None]:
     """Get the logger for a specific task
 
     Parameters
@@ -355,15 +380,9 @@ def get_task_logger(task_name: str) -> Callable[[int, str, int, str], None]:
         The logging function
     """
     # 1. Get the logger
-    logger_dict = logging.Logger.manager.loggerDict
-    logger_names = list(logger_dict.keys())
-    pattern = fr"tvm\.meta_schedule\.logging\.task_\d+_{task_name}$"
-    matching_strings = [s for s in logger_names if re.match(pattern, s)]
-    assert len(matching_strings) == 1
+    file_logger_obj = get_task_logger(task_name=task_name)
 
-    # 2. Take the first and only logger, (names are shortened to 100
-    #    characters see meta_schedule.logging.py)
-    file_logger_obj = get_logger(matching_strings[0][:100])
+    # 2. Get the logging function
     file_logger = get_logging_func(file_logger_obj)
     if file_logger is None:
         raise ValueError("The logging function retrieved is None.")
@@ -549,7 +568,7 @@ class TuningSummary:
             The search space size
         """
         csv_message = ""
-        task_logger = get_task_logger(task_name=task_name)
+        task_logger = get_task_logging_func(task_name=task_name)
         message = "Scores of returned schedules:\n"
         for i, score in enumerate(self.scores):
             if i != 0 and i % 16 == 0:
@@ -635,7 +654,7 @@ class PostProcessingStatistic:
             Description of what the postprocessing statistic is related to (tuning/sampling)
         """
         # 1. Get the logger
-        file_logger = get_task_logger(task_name=task_name)
+        file_logger = get_task_logging_func(task_name=task_name)
 
         # 3. Create message
         message_lines = [f"{intro}"]
@@ -891,7 +910,7 @@ class BayOptTuner:
         search_space_size: int
             The search space size
         """
-        task_logger = get_task_logger(self.context.task_name)
+        task_logger = get_task_logging_func(self.context.task_name)
 
         csv_message = ""
         message = "Scores of returned schedules:\n"
@@ -2392,38 +2411,20 @@ class TuningState:
         with Profiler.timeit("BayOptSearch/GenerateCandidates/SamplePopulation"):
             output_schedules: List[Schedule] = []
             fail_count: int = 0
-            postproc_stats = PostProcessingStatistic()
             while (fail_count < self.search_strategy.max_fail_count and
                    len(output_schedules) < self.search_strategy.init_min_unmeasured):
+                schedules = sample_initial_population(self.postprocs,
+                                                      self.design_spaces,
+                                                      self.mod,
+                                                      num_schedules,
+                                                      get_task_logger(self.context.task_name))
 
-                def create_random_schedule() -> Schedule | None:
-                    # 1. Randomly pick a design space
-                    design_space_index: int = sample_int(0, len(self.design_spaces))
-                    # 2. Create a trace with random decisions from design space instructions
-                    trace: Trace = Trace(self.design_spaces[design_space_index].insts, {})
-                    # 3. Create a schedule from trace
-                    sch: Schedule | None = create_schedule_from_trace(
-                                                mod=self.mod,
-                                                trace=trace,
-                                                postprocs=self.postprocs,
-                                                rand_state=forkseed(self.rand_state),
-                                                postproc_stats=postproc_stats
-                                           )
-                    return sch
+                if schedules is not None and len(schedules) != 0:
+                    output_schedules.extend(schedules)
+                else:
+                    fail_count += 1
+                num_schedules -= len(schedules)
 
-                # 4. Sample random traces
-                found_new = False
-                for _ in range(num_schedules):
-                    sch: Schedule | None = create_random_schedule()
-                    if sch is not None:
-                        output_schedules.append(sch)
-                        found_new = True
-
-                fail_count += int(found_new)
-                # 5. Adjust the number of remaining schedules (in case of failures > 0)
-                num_schedules -= len(output_schedules)
-            postproc_stats.log(self.context.task_name, current_line_number(),
-                               "Sample Initial Population Postproc Summary:")
             log(logging.INFO, __name__, current_line_number(),
                    f"Sampled {len(output_schedules)} schedules randomly")
             return output_schedules
@@ -2453,7 +2454,7 @@ class TuningState:
                 assert record[0].run_secs is not None
                 best_time = min([float(time) for time in record[0].run_secs]) * 10**6
 
-                task_logger = get_task_logger(self.context.task_name)
+                task_logger = get_task_logging_func(self.context.task_name)
 
                 for result, candidate in zip(results, measure_candidates):
                     if result.run_secs is not None:
