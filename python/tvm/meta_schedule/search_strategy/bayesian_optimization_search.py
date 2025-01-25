@@ -1299,8 +1299,9 @@ class BayOptTuner:
         failure_count: int = 0  # The number of created schedules that failed post processing
         while (success_count < self.max_trials and failure_count < self.max_sch_failure):
             # 2. Get new decisions to probe
-            next_decisions: Optional[dict] = self.get_next_decision(optimizer,
-                                                                    probed_discrete_points)
+            with Profiler.timeit("BayOptSearch/Tuner/GetNextDecision"):
+                next_decisions: Optional[dict] = self.get_next_decision(optimizer,
+                                                                        probed_discrete_points)
 
             # 3. Check that the optimizer did not fail to suggest a new point
             if next_decisions is None:
@@ -1402,29 +1403,30 @@ class BayOptTuner:
         decisions: dict[Instruction, DECISION_TYPE]
             The instructions and decisions to look for
         """
-        assert sch.trace is not None
-        matched_decisions: dict[Instruction, DecisionType] = dict()
-        for inst, decision in list(decisions.items()):
-            matched_inst = self.find_matching_instruction(sch=sch, inst=inst)
-            matched_decisions[matched_inst] = decision
+        with Profiler.timeit("BayOptSearch/Tuner/ValidateDecisionApplication"):
+            assert sch.trace is not None
+            matched_decisions: dict[Instruction, DecisionType] = dict()
+            for inst, decision in list(decisions.items()):
+                matched_inst = self.find_matching_instruction(sch=sch, inst=inst)
+                matched_decisions[matched_inst] = decision
 
-        for inst, decision in list(sch.trace.decisions.items()):
-            if inst.kind.name == "SamplePerfectTile" and inst in matched_decisions:
-                expected_decision = list(matched_decisions[inst])
-                decision = [int(x) for x in decision]
+            for inst, decision in list(sch.trace.decisions.items()):
+                if inst.kind.name == "SamplePerfectTile" and inst in matched_decisions:
+                    expected_decision = list(matched_decisions[inst])
+                    decision = [int(x) for x in decision]
 
-                if expected_decision != decision:
-                    log(logging.ERROR, __name__, current_line_number(),
-                           f"Could not find expected decision in trace for {inst} " +
-                           f"Expected: {expected_decision} Got: {decision}")
+                    if expected_decision != decision:
+                        log(logging.ERROR, __name__, current_line_number(),
+                               f"Could not find expected decision in trace for {inst} " +
+                               f"Expected: {expected_decision} Got: {decision}")
 
-            if inst.kind.name == "SampleCategorical":
-                expected_decision = matched_decisions[inst]
+                if inst.kind.name == "SampleCategorical":
+                    expected_decision = matched_decisions[inst]
 
-                if expected_decision != decision:
-                    log(logging.ERROR, __name__, current_line_number(),
-                           f"Could not find expected decision in trace for {inst} " +
-                           f"Expected: {expected_decision} Got: {decision}")
+                    if expected_decision != decision:
+                        log(logging.ERROR, __name__, current_line_number(),
+                               f"Could not find expected decision in trace for {inst} " +
+                               f"Expected: {expected_decision} Got: {decision}")
 
     def apply_decisions(self, untuned_sch: Schedule,
                         decisions: dict[Instruction, DecisionType]) -> Optional[Schedule]:
@@ -1441,18 +1443,19 @@ class BayOptTuner:
         -------
         The Schedule with the decisions if application was successful
         """
-        # 1. Get the schedules trace
-        assert untuned_sch.trace is not None
-        trace: Trace = untuned_sch.trace
+        with Profiler.timeit("BayOptSearch/Tuner/ApplyDecisions"):
+            # 1. Get the schedules trace
+            assert untuned_sch.trace is not None
+            trace: Trace = untuned_sch.trace
 
-        # 2. Apply the decisions to the trace
-        for inst, decision in list(decisions.items()):
-            trace = trace.with_decision(inst=inst, decision=decision, remove_postproc=True)
+            # 2. Apply the decisions to the trace
+            for inst, decision in list(decisions.items()):
+                trace = trace.with_decision(inst=inst, decision=decision, remove_postproc=True)
 
-        # 3. Create a new schedule from the updated trace and return it
-        return create_schedule_from_trace(mod=self.mod, trace=trace, postprocs=self.postprocs,
-                                          rand_state=forkseed(self.rand_state),
-                                          postproc_stats=self.postproc_stats)
+            # 3. Create a new schedule from the updated trace and return it
+            return create_schedule_from_trace(mod=self.mod, trace=trace, postprocs=self.postprocs,
+                                              rand_state=forkseed(self.rand_state),
+                                              postproc_stats=self.postproc_stats)
 
     def post_tuning_log_copy(self, tuned_sch: Schedule, untuned_sch: Schedule):
         """Legacy function needed when each unique trace has its own optimizer
@@ -1846,35 +1849,36 @@ class BayOptTuner:
         result_decisions: dict[Instruction, DECISION_TYPE]
             A dictionary containing the instructions and their predicted decisions
         """
-        assert untuned_sch.trace is not None
-        result_decisions: dict[Instruction, DecisionType] = dict()
+        with Profiler.timeit("BayOptSearch/Tuner/BuildDecisionDict"):
+            assert untuned_sch.trace is not None
+            result_decisions: dict[Instruction, DecisionType] = dict()
 
-        for inst, decisions in untuned_sch.trace.decisions.items():
-            if inst.kind.name == "SamplePerfectTile":
-                # 1. Get the name of the instruction
-                inst_dec_tag: str = self.get_parameter_name(inst, decisions)
-                # 2. Get the corresponding key for the lookup table
-                #    (Instructions with only one possible decision are not included)
-                if inst_dec_tag in self.instruction_decsion_key:
-                    decision_key = self.instruction_decsion_key[inst_dec_tag]
-                    # 3. Get all possible decisions for the instruction
-                    possible_decisions = decision_lookup[decision_key]
-                    # 4. Get the BO suggested index for the instruction decision
-                    predicted_index = int(next_decisions[inst_dec_tag])
+            for inst, decisions in untuned_sch.trace.decisions.items():
+                if inst.kind.name == "SamplePerfectTile":
+                    # 1. Get the name of the instruction
+                    inst_dec_tag: str = self.get_parameter_name(inst, decisions)
+                    # 2. Get the corresponding key for the lookup table
+                    #    (Instructions with only one possible decision are not included)
+                    if inst_dec_tag in self.instruction_decsion_key:
+                        decision_key = self.instruction_decsion_key[inst_dec_tag]
+                        # 3. Get all possible decisions for the instruction
+                        possible_decisions = decision_lookup[decision_key]
+                        # 4. Get the BO suggested index for the instruction decision
+                        predicted_index = int(next_decisions[inst_dec_tag])
+                        # 5. Save the instruction and the chosen decision
+                        result_decisions[inst] = possible_decisions[predicted_index]
+                elif inst.kind.name == "SampleCategorical":
+                    # 1. Get the name of the instruction
+                    inst_dec_tag: str = self.get_parameter_name(inst, decisions)
+                    # 2. Get the BO suggested decision
+                    predicted_decision = int(next_decisions[inst_dec_tag])
+                    # 3. Create the decision object
+                    tvm_object_decision = make_node("IntImm", dtype=String("int32"),
+                                                    value=predicted_decision, span=None)
                     # 5. Save the instruction and the chosen decision
-                    result_decisions[inst] = possible_decisions[predicted_index]
-            elif inst.kind.name == "SampleCategorical":
-                # 1. Get the name of the instruction
-                inst_dec_tag: str = self.get_parameter_name(inst, decisions)
-                # 2. Get the BO suggested decision
-                predicted_decision = int(next_decisions[inst_dec_tag])
-                # 3. Create the decision object
-                tvm_object_decision = make_node("IntImm", dtype=String("int32"),
-                                                value=predicted_decision, span=None)
-                # 5. Save the instruction and the chosen decision
-                result_decisions[inst] = tvm_object_decision
+                    result_decisions[inst] = tvm_object_decision
 
-        return result_decisions
+            return result_decisions
 
 
 class TuningState:
