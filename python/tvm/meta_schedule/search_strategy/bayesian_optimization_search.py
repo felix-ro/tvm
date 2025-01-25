@@ -29,10 +29,11 @@ import re
 import heapq
 from itertools import permutations
 from typing import TYPE_CHECKING, List, Optional, Any, Tuple, Callable
-from bayes_opt import BayesianOptimization, UtilityFunction, SequentialDomainReductionTransformer
+from bayes_opt import BayesianOptimization, SequentialDomainReductionTransformer, acquisition
 from bayes_opt.logger import JSONLogger
 from bayes_opt.event import Events
-from bayes_opt.util import load_logs, NotUniqueError
+from bayes_opt.util import load_logs
+from bayes_opt.exception import NotUniqueError
 import numpy as np
 
 from tvm.tir.schedule import Schedule, Trace, Instruction, BlockRV
@@ -55,12 +56,9 @@ if TYPE_CHECKING:
     from ..database import Database, TuningRecord
     from ..tune_context import TuneContext
     from ..postproc import Postproc
-    from ..logging import Logger
+    from bayes_opt.acquisition import AcquisitionFunction
 
-from timeit import default_timer as timer
-
-DECISION_TYPE = Any
-ATTR_TYPE = Any
+DecisionType = Any
 
 decision_lookup = dict()
 logger: "Logger" = get_logger(__name__)  # pylint: disable=invalid-name
@@ -1032,7 +1030,7 @@ class BayOptTuner:
                             candidates.append(applied_sch)
                         else:
                             self.tuning_report.tune_failure = True
-                except Exception:
+                except Exception: # pylint: disable=broad-exception-caught
                     continue
             elif inst.kind.name == "SampleComputeLocation":
                 current_index += 1
@@ -1147,7 +1145,7 @@ class BayOptTuner:
 
         return input_decisions
 
-    def get_acquisition_function(self) -> UtilityFunction:
+    def get_acquisition_function(self) -> "AcquisitionFunction":
         """Returns the acquisition function
 
         Returns
@@ -1157,18 +1155,18 @@ class BayOptTuner:
         """
         if self.acquisition_func_kind == "ucb":
             # Upper Confidence Bound
-            acq_func = UtilityFunction(kind="ucb", kappa=self.kappa)
+            acq_func = acquisition.UpperConfidenceBound(kappa=self.kappa)
         elif self.acquisition_func_kind == "poi":
             # Probability of Improvement
-            acq_func = UtilityFunction(kind="poi", kappa=self.xi)
+            acq_func = acquisition.ProbabilityOfImprovement(xi=self.xi)
         elif self.acquisition_func_kind == "ei":
             # Expected Improvement
-            acq_func = UtilityFunction(kind="ei", xi=self.xi)
+            acq_func = acquisition.ExpectedImprovement(xi=self.xi)
         else:
             raise ValueError(f"Unknown acquisition function of kind: {self.acquisition_func_kind}")
         return acq_func
 
-    def get_next_decision(self, optimizer: BayesianOptimization, acq_func: UtilityFunction,
+    def get_next_decision(self, optimizer: BayesianOptimization,
                           probed_discrete_points: set[str]) -> Optional[dict]:
         """Get the next point to probe from the optimizer
 
@@ -1198,7 +1196,7 @@ class BayOptTuner:
         iteration = 0
         while not new_decision and iteration < 15:
             iteration += 1
-            possible_decision: dict = optimizer.suggest(acq_func)
+            possible_decision: dict = optimizer.suggest()
             suggested_decision_values = list(possible_decision.values())
             discrete_decision_points = create_hash(str([int(x) for x in suggested_decision_values]))
             if discrete_decision_points not in probed_discrete_points:
@@ -1255,30 +1253,33 @@ class BayOptTuner:
         if self.use_sequential_domain_reduction:
             bounds_transformer = SequentialDomainReductionTransformer(minimum_window=1)
 
-        # 4. Construct the optimizer
+        # 4. Get the acquisition function (UtilityFunction)
+        acq_func: "AcquisitionFunction" = self.get_acquisition_function()
+
+        # 5. Construct the optimizer
         optimizer = BayesianOptimization(
             f=None,
             pbounds=pbounds,
+            acquisition_function=acq_func,
             verbose=2,
             random_state=forkseed(self.rand_state),
             allow_duplicate_points=False,
             bounds_transformer=bounds_transformer
         )
 
-        # 5. Set up the optimizer logging and read back probed points
+        # 6. Set up the optimizer logging and read back probed points
         probed_discrete_points: set[str] = set()
         optimizer = self.configure_optimizer_logging(untuned_sch=input_sch, optimizer=optimizer,
                                                      probed_discrete_points=probed_discrete_points)
-
-        # 6. Get the acquisition function (UtilityFunction)
-        acq_func: UtilityFunction = self.get_acquisition_function()
 
         # 7. Since our input into tuning are schedules with high scores we want to register their
         #    decisions with the optimizer, so that it knows about a good point in the beginning.
         input_decisions = self.get_decisions(sch=input_sch)
         try:
-            optimizer.register(params=input_decisions, target=self.tuning_report.pre_tuning_score)
-            probed_discrete_points.add(create_hash(str(list(input_decisions.values()))))
+            if self.tuning_report.pre_tuning_score:
+                optimizer.register(params=input_decisions,
+                                   target=self.tuning_report.pre_tuning_score)
+                probed_discrete_points.add(create_hash(str(list(input_decisions.values()))))
         except NotUniqueError:
             # When registering a database schedule by hand we may create a duplicate.
             pass
@@ -1298,7 +1299,7 @@ class BayOptTuner:
         failure_count: int = 0  # The number of created schedules that failed post processing
         while (success_count < self.max_trials and failure_count < self.max_sch_failure):
             # 2. Get new decisions to probe
-            next_decisions: Optional[dict] = self.get_next_decision(optimizer, acq_func,
+            next_decisions: Optional[dict] = self.get_next_decision(optimizer,
                                                                     probed_discrete_points)
 
             # 3. Check that the optimizer did not fail to suggest a new point
@@ -1382,7 +1383,7 @@ class BayOptTuner:
         applied_schedule: Optional[Schedule]
             The Schedule with the suggested decisions if application was successful
         """
-        decisions: dict[Instruction, DECISION_TYPE] = self.build_decision_dict(untuned_sch,
+        decisions: dict[Instruction, DecisionType] = self.build_decision_dict(untuned_sch,
                                                                                next_decisions)
         tuned_schedule: Optional[Schedule] = self.apply_decisions(untuned_sch, decisions)
 
@@ -1391,7 +1392,7 @@ class BayOptTuner:
         return tuned_schedule
 
     def validate_tuning_decision_application(self, sch: Schedule,
-                                             decisions: dict[Instruction, DECISION_TYPE]):
+                                             decisions: dict[Instruction, DecisionType]):
         """Logs if not all suggested decisions were applied to the Schedule
 
         Parameters
@@ -1402,7 +1403,7 @@ class BayOptTuner:
             The instructions and decisions to look for
         """
         assert sch.trace is not None
-        matched_decisions: dict[Instruction, DECISION_TYPE] = dict()
+        matched_decisions: dict[Instruction, DecisionType] = dict()
         for inst, decision in list(decisions.items()):
             matched_inst = self.find_matching_instruction(sch=sch, inst=inst)
             matched_decisions[matched_inst] = decision
@@ -1426,7 +1427,7 @@ class BayOptTuner:
                            f"Expected: {expected_decision} Got: {decision}")
 
     def apply_decisions(self, untuned_sch: Schedule,
-                        decisions: dict[Instruction, DECISION_TYPE]) -> Optional[Schedule]:
+                        decisions: dict[Instruction, DecisionType]) -> Optional[Schedule]:
         """Applies decisions to a trace
 
         Parameters
@@ -1704,7 +1705,7 @@ class BayOptTuner:
             if str(new_inst.outputs) == str(inst.outputs):
                 return new_inst
 
-    def get_parameter_name(self, inst: Instruction, decisions: DECISION_TYPE) -> str:
+    def get_parameter_name(self, inst: Instruction, decisions: DecisionType) -> str:
         """Get a per Schedule unique name for SamplePerfectTile and SampleCategorical
         Instructions
 
@@ -1829,7 +1830,7 @@ class BayOptTuner:
                                           postproc_stats=self.postproc_stats)
 
     def build_decision_dict(self, untuned_sch: Schedule,
-                            next_decisions: dict) -> dict[Instruction, DECISION_TYPE]:
+                            next_decisions: dict) -> dict[Instruction, DecisionType]:
         """Builds a dictionary of instructions and their decisions based on predictions
         made by the Bayesian Optimizer
 
@@ -1846,7 +1847,7 @@ class BayOptTuner:
             A dictionary containing the instructions and their predicted decisions
         """
         assert untuned_sch.trace is not None
-        result_decisions: dict[Instruction, DECISION_TYPE] = dict()
+        result_decisions: dict[Instruction, DecisionType] = dict()
 
         for inst, decisions in untuned_sch.trace.decisions.items():
             if inst.kind.name == "SamplePerfectTile":
